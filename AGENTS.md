@@ -4,8 +4,9 @@
 
 This repository contains the `picsort` Python CLI for deduplicating and organizing large image libraries.
 
-- `src/picsort/`: application package, divided by CLI commands, indexing, image inspection, organization, and reporting.
-- `tests/`: automated unit and integration tests, mirroring the `src/picsort/` package structure.
+- `src/picsort/`: application package, with modules for the CLI, SQLite index, media inspection, organization, progress display, and HTML reporting.
+- `tests/`: pytest coverage for the end-to-end workflow and focused image, video, resumability, and organization behavior.
+- `bin/picsort`: repository-local launcher that adds `src/` to `PYTHONPATH`.
 - `README.md`: setup, supported formats, workflow examples, and operational guidance.
 - `pyproject.toml`: package metadata, dependencies, and development tooling.
 - `venv/`: local virtual environment; never commit it.
@@ -42,7 +43,7 @@ Use `pytest`; name files `test_*.py` and tests `test_<behavior>`. Cover resumabi
 
 ## Commit & Pull Request Guidelines
 
-There is no existing Git history, so use imperative commit subjects such as `Add resumable discovery index`. Keep commits focused. Pull requests should describe behavior changes, document CLI examples, list tests and checks run, and call out compatibility or dependency changes. Include report screenshots only when changing HTML presentation.
+The repository uses `main` and has a small existing Git history. Since that history does not yet establish a strong message convention, use concise imperative commit subjects such as `Add resumable discovery index`. Keep commits focused. Pull requests should describe behavior changes, document CLI examples, list tests and checks run, and call out compatibility or dependency changes. Include report screenshots only when changing HTML presentation.
 
 ## Security & Configuration Tips
 
