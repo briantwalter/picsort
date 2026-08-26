@@ -1,0 +1,91 @@
+# picsort
+
+`picsort` scans large image collections, records durable metadata in SQLite, groups exact and visually similar images, and copies the best candidate into a date-based library. Source files are never modified.
+
+## Setup
+
+```bash
+python3 -m venv venv
+source ./venv/bin/activate
+pip3 install -r requirements.txt
+```
+
+Install optional decoders when needed:
+
+```bash
+pip3 install -e '.[heic,raw]'
+```
+
+## Workflow
+
+Discovery is resumable and may be rerun after an interruption:
+
+```bash
+./bin/picsort discover /Photos --index /Library/.picsort.sqlite --workers 8
+./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --workers 8 --dry-run
+./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --workers 8
+./bin/picsort report --index /Library/.picsort.sqlite --output /Library/index.html
+```
+
+For multiple input directories, put one directory per line in a text file. Blank lines and lines beginning with `#` are ignored:
+
+```text
+/Volumes/Camera A/DCIM
+/Volumes/Camera B/DCIM
+# /Volumes/Archive/old-photos
+```
+
+Then use the list with `discover` or `run`:
+
+```bash
+./bin/picsort discover --source-list sources.txt --index /Library/.picsort.sqlite
+./bin/picsort run --source-list sources.txt --index /Library/.picsort.sqlite --destination /Library
+```
+
+To run all three phases in sequence, use `run`. The report defaults to `DESTINATION/index.html`:
+
+```bash
+./bin/picsort run /Photos \
+  --index /Library/.picsort.sqlite \
+  --destination /Library \
+  --workers 8 \
+  --dry-run
+```
+
+Videos are opt-in and exclusive. Install the PyAV dependency from `requirements.txt`, then use `--videos` to process only video clips:
+
+```bash
+./bin/picsort run /Videos --videos \
+  --index /Library/.picsort.sqlite \
+  --destination /Library \
+  --workers 8
+```
+
+Supported video extensions are `mp4`, `mov`, `m4v`, `avi`, `mkv`, and `webm`. Video duplicates use exact MD5 matching and are copied byte-for-byte. Embedded container dates are used for year folders; missing dates and epoch dates go under `unsorted`.
+
+Add `-v` or `--verbose` to any command to print each processed file or report stage. Without verbose mode, `discover` and `organize` show a live progress bar with completed count, processing rate, and estimated time remaining. For example:
+
+```bash
+./bin/picsort discover /Photos --index /Library/.picsort.sqlite --workers 8 --verbose
+./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --workers 8 --dry-run
+```
+
+`discover` and `run` show directory and entry counts, matching-file counts, elapsed time, and scan rate by default while the source directory is being enumerated. The exact total and ETA become available once enumeration finishes. Use `-q` or `--quiet` to suppress live status output:
+
+```bash
+./bin/picsort discover /Photos --index /Library/.picsort.sqlite --quiet
+```
+
+Selected files are byte-for-byte copies named `YYYY-MM-DD-<md5>.<ext>`, with normalized three-character extensions (`jpeg` becomes `jpg`, `tiff` becomes `tif`). EXIF capture dates produce a `YYYY` folder; images without a valid EXIF date, or with epoch years 1969/1970, go under `unsorted` and use the `0000-00-00` filename prefix. Existing destination files are never replaced.
+
+Discovery ignores common thumbnail names such as `thumb`, `thumbnail`, `preview`, `small`, and `icon`. Add `--ignore-pattern` to provide regular expressions. Use `--phash-threshold` on `organize` to tune visually similar grouping; the default is conservative.
+
+Run `./bin/picsort --help` or `./bin/picsort <command> --help` for complete usage. `--workers N` controls parallel metadata inspection during discovery and parallel byte-for-byte copying during organization. `--dry-run` reports planned organization without changing the destination or index.
+
+The report is a standalone HTML file with totals, formats, EXIF date summaries, duplicate/error counts, and links to generated destination folders.
+
+Discovery fingerprints each file using its size and modification time before reading it. Unchanged files are skipped, so rerunning a scan does not reread the existing library.
+
+## Development
+
+Run tests with `pytest`. Run `ruff check .` and `ruff format --check .` before submitting changes. Tests use temporary image libraries and must not depend on personal photo data.

@@ -1,0 +1,12 @@
+# Core image inspection and perceptual hashing
+Pillow>=10.0
+ImageHash>=4.3
+
+# HEIC and camera RAW decoding
+pillow-heif>=0.16
+rawpy>=0.19
+av>=12.0
+
+# Development and validation
+pytest>=8.0
+ruff>=0.6
