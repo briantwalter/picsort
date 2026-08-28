@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import re
+import threading
 from pathlib import Path
 
 import imagehash
@@ -34,6 +36,8 @@ DATE_TAGS = {
     for tag, name in ExifTags.TAGS.items()
     if name in {"DateTimeOriginal", "DateTimeDigitized", "DateTime"}
 }
+_HEIF_LOCK = threading.Lock()
+_HEIF_REGISTERED = False
 
 
 def is_supported(path: Path, media_type: str = "image") -> bool:
@@ -56,7 +60,29 @@ def md5_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def normalized_extension(path: Path) -> str:
     extension = path.suffix.lower().lstrip(".")
-    return {"jpeg": "jpg", "tiff": "tif", "webm": "web"}.get(extension, extension[:3])
+    return {
+        "jpg": "jpeg",
+        "jpeg": "jpeg",
+        "tif": "tiff",
+        "tiff": "tiff",
+        "webm": "web",
+        "heic": "heic",
+    }.get(extension, extension[:3])
+
+
+def _register_heif_opener() -> None:
+    global _HEIF_REGISTERED
+    if _HEIF_REGISTERED:
+        return
+    with _HEIF_LOCK:
+        if _HEIF_REGISTERED:
+            return
+        try:
+            pillow_heif = importlib.import_module("pillow_heif")
+        except ImportError as exc:
+            raise RuntimeError("HEIC files require the optional 'heic' dependency") from exc
+        pillow_heif.register_heif_opener()
+        _HEIF_REGISTERED = True
 
 
 def _open_image(path: Path):
@@ -69,6 +95,8 @@ def _open_image(path: Path):
             )
         except ImportError as exc:
             raise RuntimeError("RAW files require the optional 'raw' dependency") from exc
+    if path.suffix.lower() == ".heic":
+        _register_heif_opener()
     return Image.open(path)
 
 

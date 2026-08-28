@@ -16,6 +16,8 @@ Install optional decoders when needed:
 pip3 install -e '.[heic,raw]'
 ```
 
+HEIC originals, including the still-image component of Live Photos, require the `heic` extra. After installing it, rerun `discover` to retry previously failed HEIC files, then rerun `organize` to consider the recovered high-resolution originals.
+
 ## Workflow
 
 Discovery is resumable and may be rerun after an interruption:
@@ -76,7 +78,9 @@ Add `-v` or `--verbose` to any command to print each processed file or report st
 ./bin/picsort discover /Photos --index /Library/.picsort.sqlite --quiet
 ```
 
-Selected files are byte-for-byte copies named `YYYY-MM-DD-<md5>.<ext>`, with normalized three-character extensions (`jpeg` becomes `jpg`, `tiff` becomes `tif`). EXIF capture dates produce a `YYYY` folder; images without a valid EXIF date, or with epoch years 1969/1970, go under `unsorted` and use the `0000-00-00` filename prefix. Existing destination files are never replaced.
+Selected files are byte-for-byte copies named `YYYY-MM-DD-<md5>.<ext>`, with canonical extensions (`jpg` and `jpeg` become `jpeg`, `tif` and `tiff` become `tiff`, and `heic` remains `heic`). EXIF capture dates produce a `YYYY` folder; images without a valid EXIF date, or with years 0000, 1969, or 1970, go under `unsorted` and use the `0000-00-00` filename prefix. Existing destination files are never replaced. During `organize`, files previously generated with shortened `.jpg`, `.tif`, or `.hei` extensions are safely renamed to `.jpeg`, `.tiff`, or `.heic`; existing targets are never overwritten, and `--dry-run` previews these renames.
+
+If a later discovery finds a perceptual match with strictly greater pixel area, `organize` copies the higher-resolution image and moves the previously organized lower-resolution file under `DESTINATION/deprecated`, preserving its relative path and year folder. Deprecated files are never overwritten. Use `--dry-run` to preview both the new copy and the deprecation without changing the library or index.
 
 Discovery ignores common thumbnail names such as `thumb`, `thumbnail`, `preview`, `small`, and `icon`. Add `--ignore-pattern` to provide regular expressions. Use `--phash-threshold` on `organize` to tune visually similar grouping; the default is conservative.
 
@@ -85,6 +89,8 @@ Run `./bin/picsort --help` or `./bin/picsort <command> --help` for complete usag
 The report is a standalone HTML file with totals, formats, EXIF date summaries, duplicate/error counts, and links to generated destination folders.
 
 Discovery fingerprints each file using its size and modification time before reading it. Unchanged files are skipped, so rerunning a scan does not reread the existing library.
+
+Invalid, missing, unreadable, and non-UTF-8 source paths are reported as source errors and skipped. Files found during a partially readable scan are indexed, but existing entries are marked stale only after the entire source root is scanned successfully. If validation leaves no valid source roots, discovery exits without modifying the index.
 
 ## Development
 

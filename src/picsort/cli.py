@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -12,8 +13,23 @@ from .progress import Progress, ScanProgress
 from .report import render
 
 
-def _scan_paths(source: Path, media_type: str, patterns, on_progress=None) -> set[str]:
+def _display_path(path: Path) -> str:
+    return ascii(str(path))
+
+
+def _valid_utf8_path(path: Path) -> bool:
+    try:
+        str(path).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _scan_paths(
+    source: Path, media_type: str, patterns, on_progress=None
+) -> tuple[set[str], list[str]]:
     paths = set()
+    errors = []
     directories = entries = 0
     pending = [source]
     while pending:
@@ -21,12 +37,16 @@ def _scan_paths(source: Path, media_type: str, patterns, on_progress=None) -> se
         directories += 1
         try:
             children = os.scandir(directory)
-        except OSError:
+        except OSError as exc:
+            errors.append(f"cannot scan {_display_path(directory)}: {exc}")
             continue
         with children:
             for entry in children:
                 entries += 1
                 path = Path(entry.path)
+                if not _valid_utf8_path(path):
+                    errors.append(f"non-UTF-8 path skipped: {_display_path(path)}")
+                    continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(path)
@@ -36,28 +56,65 @@ def _scan_paths(source: Path, media_type: str, patterns, on_progress=None) -> se
                         and not ignored_by_name(path, patterns)
                     ):
                         paths.add(str(path.resolve()))
-                except OSError:
+                except OSError as exc:
+                    errors.append(f"cannot inspect {_display_path(path)}: {exc}")
                     continue
                 if on_progress and entries % 100 == 0:
                     on_progress(directories, entries, len(paths))
     if on_progress:
         on_progress(directories, entries, len(paths))
-    return paths
+    return paths, errors
 
 
-def _input_sources(args) -> list[Path]:
+def _input_sources(args) -> tuple[list[Path], list[str]]:
     if args.source_list:
-        lines = Path(args.source_list).expanduser().read_text(encoding="utf-8").splitlines()
-        return [
-            Path(line.strip()).expanduser().resolve()
+        lines = (
+            Path(args.source_list)
+            .expanduser()
+            .read_text(encoding="utf-8", errors="surrogateescape")
+            .splitlines()
+        )
+        candidates = [
+            Path(line.strip()).expanduser()
             for line in lines
             if line.strip() and not line.lstrip().startswith("#")
         ]
-    return [Path(args.source).expanduser().resolve()]
+    else:
+        candidates = [Path(args.source).expanduser()]
+
+    sources = []
+    errors = []
+    for candidate in candidates:
+        try:
+            source = candidate.resolve()
+        except OSError as exc:
+            errors.append(f"cannot resolve {_display_path(candidate)}: {exc}")
+            continue
+        if not _valid_utf8_path(source):
+            errors.append(
+                f"source resolves to a non-UTF-8 path: {_display_path(candidate)} -> "
+                f"{_display_path(source)}"
+            )
+            continue
+        try:
+            is_directory = source.is_dir()
+        except OSError as exc:
+            errors.append(f"cannot access {_display_path(source)}: {exc}")
+            continue
+        if not is_directory:
+            errors.append(f"source is not a directory: {_display_path(source)}")
+            continue
+        sources.append(source)
+    return sources, errors
 
 
 def _discover(args) -> None:
-    sources = _input_sources(args)
+    sources, source_errors = _input_sources(args)
+    for error in source_errors:
+        print(f"source error: {error}", file=sys.stderr)
+    if not sources:
+        print("No valid source directories.", file=sys.stderr)
+        raise SystemExit(2)
     index_path = Path(args.index).expanduser().resolve()
     media_type = "video" if args.videos else "image"
     verbose = args.verbose and not args.quiet
@@ -71,10 +128,19 @@ def _discover(args) -> None:
     if scanner:
         scanner.start()
     try:
-        paths_by_root = {
-            source: _scan_paths(source, media_type, patterns, scanner.update if scanner else None)
-            for source in sources
-        }
+        paths_by_root = {}
+        complete_roots = set()
+        for source in sources:
+            source_paths, scan_errors = _scan_paths(
+                source, media_type, patterns, scanner.update if scanner else None
+            )
+            paths_by_root[source] = source_paths
+            if scan_errors:
+                source_errors.extend(scan_errors)
+                for error in scan_errors:
+                    print(f"source error: {error}", file=sys.stderr)
+            else:
+                complete_roots.add(source)
     finally:
         if scanner:
             scanner.stop()
@@ -136,11 +202,14 @@ def _discover(args) -> None:
                 connection.commit()
     if progress:
         progress.finish()
-    for source, source_paths in paths_by_root.items():
-        mark_stale(connection, source, source_paths, media_type)
+    for source in complete_roots:
+        mark_stale(connection, source, paths_by_root[source], media_type)
     connection.commit()
     connection.close()
-    print(f"discovered={results} errors={failures} unchanged={unchanged} files={len(paths)}")
+    print(
+        f"discovered={results} errors={failures} source_errors={len(source_errors)} "
+        f"unchanged={unchanged} files={len(paths)}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -322,4 +391,8 @@ def _run(args) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        raise SystemExit(130) from None

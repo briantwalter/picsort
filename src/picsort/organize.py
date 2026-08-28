@@ -62,8 +62,117 @@ def _copy_file(source: str, output: Path) -> None:
     shutil.copy2(source, output)
 
 
+def _pixel_count(row) -> int:
+    return (row["width"] or 0) * (row["height"] or 0)
+
+
+def _deprecated_path(destination: Path, organized_path: str) -> tuple[Path, Path] | None:
+    try:
+        destination = destination.resolve()
+        source = Path(organized_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    deprecated_root = destination / "deprecated"
+    try:
+        relative = source.relative_to(destination)
+    except ValueError:
+        return None
+    if not relative.parts or relative.parts[0] == "deprecated":
+        return None
+    return source, deprecated_root / relative
+
+
+def _managed_destination(destination: Path, path: str) -> Path | None:
+    try:
+        destination = destination.resolve()
+        managed = Path(path).resolve()
+        managed.relative_to(destination)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return managed
+
+
+CANONICAL_EXTENSIONS = {
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+    ".heic": "heic",
+}
+LEGACY_EXTENSIONS = {"jpeg": {"jpg"}, "tiff": {"tif"}, "heic": {"hei"}}
+
+
+def _canonical_extension(row) -> str:
+    return CANONICAL_EXTENSIONS.get(Path(row["source_path"]).suffix.lower(), row["extension"])
+
+
+def _needs_normalization(row) -> bool:
+    canonical = _canonical_extension(row)
+    if canonical not in LEGACY_EXTENSIONS:
+        return False
+    if row["extension"] != canonical:
+        return True
+    destination_path = row["destination_path"]
+    return bool(
+        destination_path
+        and Path(destination_path).suffix.lower().lstrip(".") in LEGACY_EXTENSIONS[canonical]
+    )
+
+
+def _normalize_destinations(connection, rows, destination: Path, dry_run: bool) -> tuple[int, int]:
+    renamed = errors = 0
+    candidates = [row for row in rows if _needs_normalization(row)]
+    without_destination = [row for row in candidates if not row["destination_path"]]
+    if without_destination and not dry_run:
+        connection.executemany(
+            "UPDATE images SET extension=? WHERE id=?",
+            [(_canonical_extension(row), row["id"]) for row in without_destination],
+        )
+
+    by_path = {}
+    for row in candidates:
+        if row["destination_path"]:
+            key = (row["destination_path"], _canonical_extension(row))
+            by_path.setdefault(key, []).append(row)
+    for (destination_path, canonical), matching_rows in by_path.items():
+        source = _managed_destination(destination, destination_path)
+        if source is None:
+            errors += 1
+            continue
+        if source.suffix.lower() == f".{canonical}":
+            if not dry_run:
+                connection.executemany(
+                    "UPDATE images SET extension=? WHERE id=?",
+                    [(canonical, row["id"]) for row in matching_rows],
+                )
+            continue
+        if source.suffix.lower().lstrip(".") not in LEGACY_EXTENSIONS[canonical]:
+            errors += 1
+            continue
+        target = source.with_suffix(f".{canonical}")
+        if source.exists() and target.exists():
+            errors += 1
+            continue
+        if not source.exists() and not target.exists():
+            errors += 1
+            continue
+        if not dry_run and source.exists():
+            try:
+                source.rename(target)
+            except OSError:
+                errors += 1
+                continue
+        renamed += 1
+        if not dry_run:
+            connection.executemany(
+                "UPDATE images SET extension=?, destination_path=? WHERE id=?",
+                [(canonical, str(target), row["id"]) for row in matching_rows],
+            )
+    return renamed, errors
+
+
 def date_parts(exif_date: str | None) -> tuple[str, str]:
-    if exif_date and exif_date[:4] not in {"1969", "1970"}:
+    if exif_date and exif_date[:4] not in {"0000", "1969", "1970"}:
         return exif_date[:4], exif_date
     return "unsorted", "0000-00-00"
 
@@ -79,7 +188,12 @@ def organize(
     media_type: str = "image",
 ) -> dict:
     rows = list(pending_images(connection, media_type))
-    copied = skipped = duplicates = errors = 0
+    renamed, errors = _normalize_destinations(
+        connection, rows, destination, dry_run or media_type != "image"
+    )
+    if not dry_run and media_type == "image":
+        rows = list(pending_images(connection, media_type))
+    copied = skipped = duplicates = deprecated = 0
     plans = []
     groups = [[row] for row in rows] if media_type == "video" else _groups(rows, threshold)
     for group in groups:
@@ -89,12 +203,50 @@ def organize(
             continue
         folder_name, filename_date = date_parts(winner["exif_date"])
         folder = destination / folder_name
-        output = folder / f"{filename_date}-{winner['md5']}.{winner['extension']}"
-        plans.append((winner, pending, output))
+        output = folder / f"{filename_date}-{winner['md5']}.{_canonical_extension(winner)}"
+        retire = [
+            row
+            for row in group
+            if row["status"] == "organized"
+            and row["id"] != winner["id"]
+            and row["destination_path"]
+            and _pixel_count(row) < _pixel_count(winner)
+        ]
+        plans.append((winner, pending, output, retire))
     if progress_start:
         progress_start(len(plans))
 
-    def record_success(winner, pending, output, copied_now=False):
+    def retire_lower_resolution(rows):
+        nonlocal deprecated, errors
+        by_path = {}
+        for row in rows:
+            by_path.setdefault(row["destination_path"], []).append(row)
+        for organized_path, matching_rows in by_path.items():
+            paths = _deprecated_path(destination, organized_path)
+            if paths is None:
+                errors += 1
+                continue
+            source, target = paths
+            if source.exists() and target.exists():
+                errors += 1
+                continue
+            if not source.exists() and not target.exists():
+                errors += 1
+                continue
+            if source.exists():
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(source, target)
+                except OSError:
+                    errors += 1
+                    continue
+            deprecated += 1
+            connection.executemany(
+                "UPDATE images SET status='duplicate', destination_path=?, error=NULL WHERE id=?",
+                [(str(target), row["id"]) for row in matching_rows],
+            )
+
+    def record_success(winner, pending, output, retire, copied_now=False):
         nonlocal copied, skipped, duplicates
         if copied_now:
             copied += 1
@@ -114,33 +266,46 @@ def organize(
                     connection.execute(
                         "UPDATE images SET status='duplicate' WHERE id=?", (row["id"],)
                     )
+        if not dry_run:
+            retire_lower_resolution(retire)
         if progress_callback:
             progress_callback(winner["source_path"], "copied" if copied_now else "skipped")
 
     if dry_run:
-        for winner, pending, output in plans:
+        planned_deprecated = set()
+        for winner, pending, output, retire in plans:
             if output.exists():
                 skipped += 1
             else:
                 copied += 1
             duplicates += sum(row["id"] != winner["id"] for row in pending)
+            for row in retire:
+                paths = _deprecated_path(destination, row["destination_path"])
+                if paths is not None:
+                    planned_deprecated.add(paths)
             if progress_callback:
                 progress_callback(winner["source_path"], "planned")
+        deprecated = len(planned_deprecated)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_copy_file, winner["source_path"], output): (winner, pending, output)
-                for winner, pending, output in plans
+                pool.submit(_copy_file, winner["source_path"], output): (
+                    winner,
+                    pending,
+                    output,
+                    retire,
+                )
+                for winner, pending, output, retire in plans
                 if not output.exists()
             }
-            for winner, pending, output in plans:
+            for winner, pending, output, retire in plans:
                 if output.exists():
-                    record_success(winner, pending, output)
+                    record_success(winner, pending, output, retire)
             for future in as_completed(futures):
-                winner, pending, output = futures[future]
+                winner, pending, output, retire = futures[future]
                 try:
                     future.result()
-                    record_success(winner, pending, output, copied_now=True)
+                    record_success(winner, pending, output, retire, copied_now=True)
                 except (OSError, ValueError) as exc:
                     errors += 1
                     connection.execute(
@@ -151,4 +316,11 @@ def organize(
                         progress_callback(winner["source_path"], "error")
     if not dry_run:
         connection.commit()
-    return {"copied": copied, "skipped": skipped, "duplicates": duplicates, "errors": errors}
+    return {
+        "copied": copied,
+        "skipped": skipped,
+        "duplicates": duplicates,
+        "deprecated": deprecated,
+        "renamed": renamed,
+        "errors": errors,
+    }
