@@ -18,6 +18,7 @@ SUPPORTED = {
     ".tiff",
     ".webp",
     ".heic",
+    ".raw",
     ".cr2",
     ".cr3",
     ".nef",
@@ -29,7 +30,18 @@ SUPPORTED = {
     ".pef",
 }
 VIDEO_SUPPORTED = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
-RAW_EXTENSIONS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2", ".pef"}
+RAW_EXTENSIONS = {
+    ".raw",
+    ".cr2",
+    ".cr3",
+    ".nef",
+    ".arw",
+    ".dng",
+    ".raf",
+    ".orf",
+    ".rw2",
+    ".pef",
+}
 DEFAULT_IGNORE_PATTERNS = (r"(^|[_ .-])(thumb|thumbnail|preview|small|tiny|icon|avatar)([_ .-]|$)",)
 DATE_TAGS = {
     tag

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import html
+import os
 from collections import Counter
 from pathlib import Path
+from urllib.parse import quote
 
 
 def _format_duration(seconds: float) -> str:
@@ -28,25 +30,54 @@ def _date_histogram(dates: Counter) -> str:
     return f'<ul class="date-histogram" aria-label="Embedded capture dates by year">{rows}</ul>'
 
 
-def render(connection, output: Path, media_type: str = "image") -> None:
+def _capture_year(exif_date: str | None) -> str:
+    if not exif_date or exif_date[:4] in {"0000", "1969", "1970"}:
+        return "unsorted"
+    return exif_date[:4]
+
+
+def _existing_destination(path: str | None, destination: Path) -> bool:
+    if not path:
+        return False
+    try:
+        resolved = Path(path).resolve()
+        resolved.relative_to(destination.resolve())
+        return resolved.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _folder_link(folder: Path, output: Path, destination: Path) -> str:
+    href = quote(os.path.relpath(folder, output.parent), safe="/")
+    label = folder.relative_to(destination).as_posix()
+    return f'<li><a href="{html.escape(href)}">{html.escape(label)}</a></li>'
+
+
+def render(
+    connection,
+    output: Path,
+    media_type: str = "image",
+    destination: Path | None = None,
+) -> None:
+    destination = destination or output.parent
     rows = connection.execute(
         "SELECT * FROM images WHERE status != 'stale' AND media_type=?", (media_type,)
     ).fetchall()
-    organized = [row for row in rows if row["status"] == "organized"]
+    organized = [
+        row
+        for row in rows
+        if row["status"] == "organized"
+        and _existing_destination(row["destination_path"], destination)
+    ]
     formats = Counter(row["extension"] for row in organized)
-    dates = Counter(row["exif_date"][:4] if row["exif_date"] else "unsorted" for row in organized)
-    folders = sorted(
-        {str(Path(row["destination_path"]).parent) for row in organized if row["destination_path"]}
-    )
+    dates = Counter(_capture_year(row["exif_date"]) for row in organized)
+    folders = sorted({Path(row["destination_path"]).parent for row in organized})
     format_rows = "".join(
         f"<tr><td>{html.escape(key)}</td><td>{value}</td></tr>"
         for key, value in sorted(formats.items())
     )
     date_histogram = _date_histogram(dates)
-    folder_rows = "".join(
-        f'<li><a href="{html.escape(Path(folder).as_uri())}">{html.escape(folder)}</a></li>'
-        for folder in folders
-    )
+    folder_rows = "".join(_folder_link(folder, output, destination) for folder in folders)
     label = "Videos" if media_type == "video" else "Images"
     video_summary = (
         f" · Total duration: {_format_duration(sum(row['duration'] or 0 for row in organized))}"

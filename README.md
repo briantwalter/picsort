@@ -18,6 +18,8 @@ pip3 install -e '.[heic,raw]'
 
 HEIC originals, including the still-image component of Live Photos, require the `heic` extra. After installing it, rerun `discover` to retry previously failed HEIC files, then rerun `organize` to consider the recovered high-resolution originals.
 
+Camera RAW formats `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf`, `.rw2`, and `.pef` require the `raw` extra. Support for a particular `.raw` container depends on LibRaw through `rawpy`; unsupported or corrupt files are recorded as per-file errors without stopping discovery. Organized RAW originals are copied byte-for-byte.
+
 ## Workflow
 
 Discovery is resumable and may be rerun after an interruption:
@@ -44,7 +46,7 @@ Then use the list with `discover` or `run`:
 ./bin/picsort run --source-list sources.txt --index /Library/.picsort.sqlite --destination /Library
 ```
 
-To run all three phases in sequence, use `run`. The report defaults to `DESTINATION/index.html`:
+To run all three phases in sequence, use `run`. The organize phase processes only the selected media type and the source roots supplied to that `run` invocation; standalone `organize` processes the selected media type across the whole index. The report defaults to `DESTINATION/index.html`:
 
 ```bash
 ./bin/picsort run /Photos \
@@ -86,7 +88,7 @@ Discovery ignores common thumbnail names such as `thumb`, `thumbnail`, `preview`
 
 Run `./bin/picsort --help` or `./bin/picsort <command> --help` for complete usage. `--workers N` controls parallel metadata inspection during discovery and parallel byte-for-byte copying during organization. `--dry-run` reports planned organization without changing the destination or index.
 
-The report is a standalone HTML file with totals, formats, EXIF date summaries, duplicate/error counts, and links to generated destination folders.
+The report is a standalone HTML file with totals, formats, EXIF date summaries, duplicate/error counts, and relative links to generated destination folders. Organized-file totals, formats, dates, and folder links include only existing files under the report's library root, which defaults to the HTML file's parent directory. If the report is written elsewhere, pass `--destination /Library` to set the library root explicitly. Missing EXIF dates and years 0000, 1969, and 1970 are grouped as `unsorted`.
 
 Discovery fingerprints each file using its size and modification time before reading it. Unchanged files are skipped, so rerunning a scan does not reread the existing library.
 

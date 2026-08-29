@@ -186,13 +186,14 @@ def organize(
     progress_start=None,
     progress_callback=None,
     media_type: str = "image",
+    source_roots=None,
 ) -> dict:
-    rows = list(pending_images(connection, media_type))
+    rows = list(pending_images(connection, media_type, source_roots))
     renamed, errors = _normalize_destinations(
         connection, rows, destination, dry_run or media_type != "image"
     )
     if not dry_run and media_type == "image":
-        rows = list(pending_images(connection, media_type))
+        rows = list(pending_images(connection, media_type, source_roots))
     copied = skipped = duplicates = deprecated = 0
     plans = []
     groups = [[row] for row in rows] if media_type == "video" else _groups(rows, threshold)
@@ -287,6 +288,12 @@ def organize(
                 progress_callback(winner["source_path"], "planned")
         deprecated = len(planned_deprecated)
     else:
+        existing_plans = []
+        copy_plans = []
+        for plan in plans:
+            (existing_plans if plan[2].exists() else copy_plans).append(plan)
+        for winner, pending, output, retire in existing_plans:
+            record_success(winner, pending, output, retire)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(_copy_file, winner["source_path"], output): (
@@ -295,12 +302,8 @@ def organize(
                     output,
                     retire,
                 )
-                for winner, pending, output, retire in plans
-                if not output.exists()
+                for winner, pending, output, retire in copy_plans
             }
-            for winner, pending, output, retire in plans:
-                if output.exists():
-                    record_success(winner, pending, output, retire)
             for future in as_completed(futures):
                 winner, pending, output, retire = futures[future]
                 try:

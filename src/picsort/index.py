@@ -97,8 +97,21 @@ def mark_stale(
 
 
 def pending_images(
-    connection: sqlite3.Connection, media_type: str = "image"
+    connection: sqlite3.Connection,
+    media_type: str = "image",
+    source_roots: Iterable[Path | str] | None = None,
 ) -> Iterable[sqlite3.Row]:
+    roots = [str(root) for root in source_roots] if source_roots is not None else None
+    if roots is not None:
+        if not roots:
+            return []
+        placeholders = ", ".join("?" for _ in roots)
+        return connection.execute(
+            "SELECT * FROM images WHERE md5 IS NOT NULL AND status IN "
+            "('ready', 'pending', 'error', 'organized', 'duplicate') AND media_type=? "
+            f"AND source_root IN ({placeholders})",
+            (media_type, *roots),
+        )
     return connection.execute(
         "SELECT * FROM images WHERE md5 IS NOT NULL AND status IN "
         "('ready', 'pending', 'error', 'organized', 'duplicate') AND media_type=?",

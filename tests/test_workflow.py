@@ -1,11 +1,12 @@
 import os
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
 from PIL import Image, ImageOps
 
 from picsort.cli import main
-from picsort.images import inspect_image, normalized_extension
+from picsort.images import inspect_image, is_supported, normalized_extension
 from picsort.index import open_index, upsert_image
 from picsort.organize import date_parts, organize
 from picsort.report import render
@@ -67,6 +68,50 @@ def test_discover_organize_and_report(tmp_path, monkeypatch, capsys):
     assert all("thumb" not in path for path in indexed_paths)
 
 
+def test_run_organizes_only_its_requested_source(tmp_path, monkeypatch):
+    requested = tmp_path / "requested"
+    other = tmp_path / "other"
+    destination = tmp_path / "library"
+    requested.mkdir()
+    other.mkdir()
+    requested_photo = requested / "requested.jpg"
+    other_photo = other / "other.jpg"
+    make_image(requested_photo, color="red")
+    make_image(other_photo, color="blue")
+    index_path = tmp_path / "index.sqlite"
+    connection = open_index(index_path)
+    other_info = inspect_image(other_photo, other)
+    other_info["phash"] = "f" * 16
+    upsert_image(connection, other_info)
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "picsort",
+            "run",
+            str(requested),
+            "--index",
+            str(index_path),
+            "--destination",
+            str(destination),
+            "--quiet",
+        ],
+    )
+    main()
+
+    rows = (
+        open_index(index_path)
+        .execute("SELECT source_root, status FROM images ORDER BY source_root")
+        .fetchall()
+    )
+    assert [tuple(row) for row in rows] == [
+        (str(other), "ready"),
+        (str(requested), "organized"),
+    ]
+
+
 def test_organize_is_idempotent(tmp_path):
     source = tmp_path / "source"
     destination = tmp_path / "library"
@@ -82,6 +127,92 @@ def test_organize_is_idempotent(tmp_path):
     assert first["copied"] == 1
     assert second["copied"] == 0
     assert second["skipped"] == 0
+
+
+def test_organize_can_be_scoped_to_requested_source_roots(tmp_path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    destination = tmp_path / "library"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = first_root / "first.jpg"
+    second = second_root / "second.jpg"
+    make_image(first, color="red")
+    make_image(second, color="blue")
+    index = open_index(tmp_path / "index.sqlite")
+    first_info = inspect_image(first, first_root)
+    first_info["phash"] = "0" * 16
+    second_info = inspect_image(second, second_root)
+    second_info["phash"] = "f" * 16
+    upsert_image(index, first_info)
+    upsert_image(index, second_info)
+    index.commit()
+
+    result = organize(index, destination, source_roots=[first_root])
+
+    assert result["copied"] == 1
+    rows = index.execute(
+        "SELECT source_root, status, destination_path FROM images ORDER BY source_root"
+    ).fetchall()
+    assert tuple(rows[0]) == (
+        str(first_root),
+        "organized",
+        str(destination / "unsorted" / f"0000-00-00-{first_info['md5']}.jpeg"),
+    )
+    assert tuple(rows[1]) == (str(second_root), "ready", None)
+
+
+def test_organize_progress_counts_each_plan_once(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    destination = tmp_path / "library"
+    source.mkdir()
+    first = source / "first.jpg"
+    second = source / "second.jpg"
+    make_image(first, color="red")
+    make_image(second, color="blue")
+    index = open_index(tmp_path / "index.sqlite")
+    first_info = inspect_image(first, source)
+    first_info["phash"] = "0" * 16
+    second_info = inspect_image(second, source)
+    second_info["phash"] = "f" * 16
+    upsert_image(index, first_info)
+    upsert_image(index, second_info)
+    index.commit()
+    existing = destination / "unsorted" / f"0000-00-00-{first_info['md5']}.jpeg"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(first.read_bytes())
+
+    class ImmediateExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, function, *args):
+            future = Future()
+            future.set_result(function(*args))
+            return future
+
+    monkeypatch.setattr("picsort.organize.ThreadPoolExecutor", ImmediateExecutor)
+    totals = []
+    updates = []
+
+    result = organize(
+        index,
+        destination,
+        progress_start=totals.append,
+        progress_callback=lambda path, status: updates.append((path, status)),
+    )
+
+    assert totals == [2]
+    assert len(updates) == 2
+    assert sorted(status for _, status in updates) == ["copied", "skipped"]
+    assert result["copied"] == 1
+    assert result["skipped"] == 1
 
 
 def test_epoch_dates_are_unsorted():
@@ -137,6 +268,60 @@ def test_heic_without_optional_dependency_has_clear_error(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError, match="optional 'heic' dependency"):
         inspect_image(source, tmp_path)
+
+
+def test_raw_extension_is_supported(tmp_path):
+    source = tmp_path / "photo.RAW"
+    source.write_bytes(b"raw image")
+
+    assert is_supported(source)
+    assert normalized_extension(source) == "raw"
+
+
+def test_raw_without_optional_dependency_has_clear_error(tmp_path, monkeypatch):
+    source = tmp_path / "photo.raw"
+    source.write_bytes(b"raw image")
+    original_import = __import__("builtins").__import__
+
+    def import_without_rawpy(name, *args, **kwargs):
+        if name == "rawpy":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", import_without_rawpy)
+
+    with pytest.raises(RuntimeError, match="optional 'raw' dependency"):
+        inspect_image(source, tmp_path)
+
+
+def test_raw_file_is_organized_byte_for_byte(tmp_path):
+    source = tmp_path / "photo.raw"
+    source.write_bytes(b"camera raw bytes")
+    destination = tmp_path / "library"
+    index = open_index(tmp_path / "index.sqlite")
+    upsert_image(
+        index,
+        {
+            "source_path": str(source),
+            "source_root": str(tmp_path),
+            "size": source.stat().st_size,
+            "mtime_ns": source.stat().st_mtime_ns,
+            "md5": "f" * 32,
+            "phash": "0" * 16,
+            "extension": "raw",
+            "media_type": "image",
+            "width": 100,
+            "height": 100,
+            "status": "ready",
+        },
+    )
+    index.commit()
+
+    result = organize(index, destination)
+
+    output = destination / "unsorted" / f"0000-00-00-{'f' * 32}.raw"
+    assert result["copied"] == 1
+    assert output.read_bytes() == source.read_bytes()
 
 
 def test_heic_extension_is_not_truncated():
@@ -669,6 +854,9 @@ def test_report_renders_capture_dates_as_histogram(tmp_path):
     connection = open_index(tmp_path / "index.sqlite")
     for number, date in enumerate(("2024-01-02", "2024-02-03", "2023-09-04", None)):
         source = tmp_path / f"photo-{number}.jpg"
+        destination_path = tmp_path / "library" / source.name
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        destination_path.write_bytes(b"organized")
         upsert_image(
             connection,
             {
@@ -681,7 +869,7 @@ def test_report_renders_capture_dates_as_histogram(tmp_path):
                 "media_type": "image",
                 "exif_date": date,
                 "status": "organized",
-                "destination_path": str(tmp_path / "library" / source.name),
+                "destination_path": str(destination_path),
             },
         )
     connection.commit()
@@ -712,3 +900,114 @@ def test_report_capture_date_histogram_has_empty_state(tmp_path):
     report = output.read_text(encoding="utf-8")
     assert "No organized files with capture dates." in report
     assert '<ul class="date-histogram"' not in report
+
+
+def test_report_excludes_organized_paths_outside_destination(tmp_path):
+    connection = open_index(tmp_path / "index.sqlite")
+    piclib = tmp_path / "piclib"
+    vidlib = tmp_path / "vidlib"
+    rows = (
+        ("photo.jpg", "jpeg", "2024-01-02", "organized", piclib / "2024" / "photo.jpeg"),
+        ("wrong.jpg", "jpeg", "2010-01-02", "organized", vidlib / "2010" / "wrong.jpeg"),
+        ("duplicate.jpg", "jpeg", None, "duplicate", None),
+        ("broken.jpg", "jpeg", None, "error", None),
+    )
+    for number, (name, extension, date, status, destination_path) in enumerate(rows):
+        if destination_path:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            destination_path.write_bytes(b"organized")
+        upsert_image(
+            connection,
+            {
+                "source_path": str(tmp_path / name),
+                "source_root": str(tmp_path),
+                "size": number + 1,
+                "mtime_ns": number + 1,
+                "md5": f"{number:032x}",
+                "extension": extension,
+                "media_type": "image",
+                "exif_date": date,
+                "status": status,
+                "destination_path": str(destination_path) if destination_path else None,
+            },
+        )
+    connection.commit()
+    output = piclib / "index.html"
+
+    render(connection, output)
+
+    report = output.read_text(encoding="utf-8")
+    assert "Images indexed: 4 · Organized: 1 · Duplicates: 1 · Errors: 1" in report
+    assert '<a href="2024">2024</a>' in report
+    assert str(vidlib) not in report
+    assert '<span class="histogram-label">2024</span>' in report
+    assert '<span class="histogram-label">2010</span>' not in report
+
+
+def test_report_groups_invalid_capture_years_as_unsorted(tmp_path):
+    connection = open_index(tmp_path / "index.sqlite")
+    library = tmp_path / "library"
+    for number, date in enumerate(("0000-01-02", "1969-01-02", "1970-01-02", None)):
+        destination_path = library / "unsorted" / f"photo-{number}.jpeg"
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        destination_path.write_bytes(b"organized")
+        upsert_image(
+            connection,
+            {
+                "source_path": str(tmp_path / f"photo-{number}.jpg"),
+                "source_root": str(tmp_path),
+                "size": number + 1,
+                "mtime_ns": number + 1,
+                "md5": f"{number:032x}",
+                "extension": "jpeg",
+                "media_type": "image",
+                "exif_date": date,
+                "status": "organized",
+                "destination_path": str(destination_path),
+            },
+        )
+    connection.commit()
+    output = tmp_path / "reports" / "photos.html"
+
+    render(connection, output, destination=library)
+
+    report = output.read_text(encoding="utf-8")
+    assert report.count('<span class="histogram-label">unsorted</span>') == 1
+    assert '<span class="histogram-count">4</span>' in report
+    assert '<span class="histogram-label">0000</span>' not in report
+    assert '<span class="histogram-label">1969</span>' not in report
+    assert '<span class="histogram-label">1970</span>' not in report
+
+
+def test_report_excludes_missing_destinations_and_uses_relative_folder_links(tmp_path):
+    connection = open_index(tmp_path / "index.sqlite")
+    library = tmp_path / "photo library"
+    existing = library / "2024" / "photo.jpeg"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"photo")
+    for number, destination_path in enumerate((existing, library / "0000" / "missing.jpeg")):
+        upsert_image(
+            connection,
+            {
+                "source_path": str(tmp_path / f"photo-{number}.jpg"),
+                "source_root": str(tmp_path),
+                "size": number + 1,
+                "mtime_ns": number + 1,
+                "md5": f"{number:032x}",
+                "extension": "jpeg",
+                "media_type": "image",
+                "exif_date": "2024-01-02" if number == 0 else "0000-01-02",
+                "status": "organized",
+                "destination_path": str(destination_path),
+            },
+        )
+    connection.commit()
+    output = tmp_path / "reports" / "photos.html"
+
+    render(connection, output, destination=library)
+
+    report = output.read_text(encoding="utf-8")
+    assert "Organized: 1" in report
+    assert '<a href="../photo%20library/2024">2024</a>' in report
+    assert "0000" not in report
+    assert "file://" not in report

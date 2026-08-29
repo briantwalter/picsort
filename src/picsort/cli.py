@@ -108,7 +108,7 @@ def _input_sources(args) -> tuple[list[Path], list[str]]:
     return sources, errors
 
 
-def _discover(args) -> None:
+def _discover(args) -> list[Path]:
     sources, source_errors = _input_sources(args)
     for error in source_errors:
         print(f"source error: {error}", file=sys.stderr)
@@ -210,6 +210,7 @@ def _discover(args) -> None:
         f"discovered={results} errors={failures} source_errors={len(source_errors)} "
         f"unchanged={unchanged} files={len(paths)}"
     )
+    return sources
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -296,6 +297,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--index", required=True, help="SQLite index path")
     report.add_argument("--output", required=True, help="HTML report output path")
+    report.add_argument(
+        "--destination",
+        help="Library root to include (default: output file's parent directory)",
+    )
     report.set_defaults(func=_report)
     run = subparsers.add_parser("run", help="Run discover, organize, and report in sequence")
     run_sources = run.add_mutually_exclusive_group(required=True)
@@ -337,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _organize(args) -> None:
+def _organize(args, source_roots=None) -> None:
     connection = open_index(Path(args.index).expanduser().resolve())
     progress = None
     verbose = args.verbose and not args.quiet
@@ -361,6 +366,7 @@ def _organize(args) -> None:
             None if args.quiet else start,
             None if args.quiet else update,
             "video" if args.videos else "image",
+            source_roots,
         )
     )
     if progress:
@@ -370,11 +376,13 @@ def _organize(args) -> None:
 
 def _report(args) -> None:
     connection = open_index(Path(args.index).expanduser().resolve())
+    output = Path(args.output).expanduser().resolve()
+    destination = (
+        Path(args.destination).expanduser().resolve() if args.destination else output.parent
+    )
     if args.verbose and not args.quiet:
         print("Reading SQLite index...")
-    render(
-        connection, Path(args.output).expanduser().resolve(), "video" if args.videos else "image"
-    )
+    render(connection, output, "video" if args.videos else "image", destination)
     connection.close()
     if args.verbose and not args.quiet:
         print("Wrote standalone HTML report.")
@@ -382,8 +390,8 @@ def _report(args) -> None:
 
 
 def _run(args) -> None:
-    _discover(args)
-    _organize(args)
+    source_roots = _discover(args)
+    _organize(args, source_roots)
     if args.output is None:
         args.output = str(Path(args.destination).expanduser().resolve() / "index.html")
     _report(args)
