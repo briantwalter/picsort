@@ -43,11 +43,6 @@ RAW_EXTENSIONS = {
     ".pef",
 }
 DEFAULT_IGNORE_PATTERNS = (r"(^|[_ .-])(thumb|thumbnail|preview|small|tiny|icon|avatar)([_ .-]|$)",)
-DATE_TAGS = {
-    tag
-    for tag, name in ExifTags.TAGS.items()
-    if name in {"DateTimeOriginal", "DateTimeDigitized", "DateTime"}
-}
 _HEIF_LOCK = threading.Lock()
 _HEIF_REGISTERED = False
 
@@ -80,6 +75,29 @@ def normalized_extension(path: Path) -> str:
         "webm": "web",
         "heic": "heic",
     }.get(extension, extension[:3])
+
+
+def _parse_exif_date(value) -> str | None:
+    if not value:
+        return None
+    match = re.match(r"^(\d{4}):(\d{2}):(\d{2})", str(value))
+    return "-".join(match.groups()) if match else None
+
+
+def _capture_date_from_exif(exif) -> tuple[str | None, str | None]:
+    try:
+        nested = exif.get_ifd(ExifTags.IFD.Exif)
+    except (KeyError, TypeError, ValueError):
+        nested = {}
+    for tag, name in (
+        (36867, "DateTimeOriginal"),
+        (36868, "DateTimeDigitized"),
+    ):
+        date = _parse_exif_date(nested.get(tag) or exif.get(tag))
+        if date:
+            return date, name
+    date = _parse_exif_date(exif.get(306))
+    return (date, "DateTime") if date else (None, None)
 
 
 def _register_heif_opener() -> None:
@@ -127,6 +145,7 @@ def _base_result(path: Path, source_root: Path, media_type: str) -> dict:
         "height": None,
         "sharpness": None,
         "exif_date": None,
+        "date_source": None,
         "latitude": None,
         "longitude": None,
         "metadata_count": 0,
@@ -154,13 +173,7 @@ def inspect_image(path: Path, source_root: Path) -> dict:
         result["sharpness"] = float(edges.resize((1, 1)).getpixel((0, 0)))
         exif = image.getexif() if hasattr(image, "getexif") else {}
         result["metadata_count"] = len(exif)
-        for tag in DATE_TAGS:
-            value = exif.get(tag)
-            if value:
-                match = re.match(r"^(\d{4}):(\d{2}):(\d{2})", str(value))
-                if match:
-                    result["exif_date"] = "-".join(match.groups())
-                    break
+        result["exif_date"], result["date_source"] = _capture_date_from_exif(exif)
     finally:
         close = getattr(image, "close", None)
         if close:
@@ -170,6 +183,17 @@ def inspect_image(path: Path, source_root: Path) -> dict:
             if source_close:
                 source_close()
     return result
+
+
+def inspect_capture_date(path: Path) -> tuple[str | None, str | None]:
+    source_image = _open_image(path)
+    try:
+        exif = source_image.getexif() if hasattr(source_image, "getexif") else {}
+        return _capture_date_from_exif(exif)
+    finally:
+        close = getattr(source_image, "close", None)
+        if close:
+            close()
 
 
 def _video_date(metadata: dict) -> str | None:

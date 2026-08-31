@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS images (
     frame_rate REAL,
     codec TEXT,
     exif_date TEXT,
+    date_source TEXT,
     latitude REAL,
     longitude REAL,
     metadata_count INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +53,7 @@ def open_index(path: Path) -> sqlite3.Connection:
         "bitrate": "INTEGER",
         "frame_rate": "REAL",
         "codec": "TEXT",
+        "date_source": "TEXT",
     }
     for column, definition in migrations.items():
         if column not in columns:

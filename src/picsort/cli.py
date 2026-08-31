@@ -286,6 +286,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show planned copies without writing files or index changes",
     )
+    organize_parser.add_argument(
+        "--repair-dates",
+        action="store_true",
+        help="Rescan managed destination images and move files to corrected date folders",
+    )
     organize_parser.set_defaults(func=_organize)
     report = subparsers.add_parser("report", help="Write a standalone HTML library report")
     report.add_argument(
@@ -345,7 +350,14 @@ def build_parser() -> argparse.ArgumentParser:
 def _organize(args, source_roots=None) -> None:
     connection = open_index(Path(args.index).expanduser().resolve())
     progress = None
+    repair_progress = None
+    repair_scanner = None
+    repair_scanning = False
     verbose = args.verbose and not args.quiet
+    repair_dates = getattr(args, "repair_dates", False)
+    if repair_dates and args.videos:
+        connection.close()
+        raise SystemExit("--repair-dates is available only for pictures")
     if verbose:
         print("Preparing duplicate groups and copy plan...")
 
@@ -356,8 +368,28 @@ def _organize(args, source_roots=None) -> None:
     def update(path, status):
         progress.update(f"{status}: {path}")
 
-    print(
-        organize(
+    def repair_start(total):
+        nonlocal repair_progress, repair_scanning
+        if repair_scanner and repair_scanning:
+            repair_scanner.stop()
+            repair_scanning = False
+        repair_progress = Progress(total, "Repairing dates", verbose)
+
+    def repair_update(path, status):
+        repair_progress.update(f"{status}: {path}")
+
+    def repair_finish():
+        nonlocal repair_progress
+        if repair_progress:
+            repair_progress.finish()
+            repair_progress = None
+
+    if repair_dates and not args.quiet:
+        repair_scanner = ScanProgress("Scanning destination for date repair")
+        repair_scanner.start()
+        repair_scanning = True
+    try:
+        result = organize(
             connection,
             Path(args.destination).expanduser().resolve(),
             args.phash_threshold,
@@ -367,10 +399,30 @@ def _organize(args, source_roots=None) -> None:
             None if args.quiet else update,
             "video" if args.videos else "image",
             source_roots,
+            repair_dates,
+            repair_scanner.update if repair_scanner else None,
+            repair_start if repair_scanner else None,
+            repair_update if repair_scanner else None,
+            repair_finish if repair_scanner else None,
         )
-    )
+    finally:
+        if repair_scanner and repair_scanning:
+            repair_scanner.stop()
+        repair_finish()
     if progress:
         progress.finish()
+    folders = result.pop("folders")
+    repair = result.pop("repair", None)
+    print(result)
+    if repair is not None:
+        print("Date repair: " + " ".join(f"{name}={count}" for name, count in repair.items()))
+    heading = "Planned files by folder" if args.dry_run else "Added files by folder"
+    print(f"{heading}:")
+    if folders:
+        for folder, count in folders.items():
+            print(f"  {folder}: {count}")
+    else:
+        print("  none")
     connection.close()
 
 

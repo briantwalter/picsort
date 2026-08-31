@@ -19,6 +19,26 @@ def make_image(path: Path, size=(20, 20), color="red", date=None):
     image.save(path, format="JPEG", exif=image.getexif().tobytes())
 
 
+def make_nested_date_image(
+    path: Path,
+    top_level: str | None,
+    original: str | None = None,
+    digitized: str | None = None,
+):
+    image = Image.new("RGB", (40, 30), "red")
+    exif = image.getexif()
+    if top_level:
+        exif[306] = top_level
+    nested = {}
+    if original:
+        nested[36867] = original
+    if digitized:
+        nested[36868] = digitized
+    if nested:
+        exif[34665] = nested
+    image.save(path, format="JPEG", exif=exif.tobytes())
+
+
 def add_index_row(connection, source_path: Path, source_root: Path, status="ready"):
     upsert_image(
         connection,
@@ -54,6 +74,9 @@ def test_discover_organize_and_report(tmp_path, monkeypatch, capsys):
         ["picsort", "organize", "--index", str(index), "--destination", str(destination)],
     )
     main()
+    organize_output = capsys.readouterr().out
+    assert "Added files by folder:" in organize_output
+    assert f"  {destination / '2024'}: 1" in organize_output
     output = destination / "index.html"
     monkeypatch.setattr(
         "sys.argv", ["picsort", "report", "--index", str(index), "--output", str(output)]
@@ -125,8 +148,10 @@ def test_organize_is_idempotent(tmp_path):
     first = organize(index, destination)
     second = organize(index, destination)
     assert first["copied"] == 1
+    assert first["folders"] == {str(destination / "2024"): 1}
     assert second["copied"] == 0
     assert second["skipped"] == 0
+    assert second["folders"] == {}
 
 
 def test_organize_can_be_scoped_to_requested_source_roots(tmp_path):
@@ -221,6 +246,45 @@ def test_epoch_dates_are_unsorted():
     assert date_parts("1970-01-01") == ("unsorted", "0000-00-00")
     assert date_parts(None) == ("unsorted", "0000-00-00")
     assert date_parts("2024-03-04") == ("2024", "2024-03-04")
+
+
+def test_nested_original_date_precedes_top_level_date(tmp_path):
+    source = tmp_path / "photo.jpg"
+    make_nested_date_image(
+        source,
+        top_level="2010:07:25 18:36:32",
+        original="2009:10:30 22:10:05",
+        digitized="2009:10:31 01:02:03",
+    )
+
+    info = inspect_image(source, tmp_path)
+
+    assert info["exif_date"] == "2009-10-30"
+    assert info["date_source"] == "DateTimeOriginal"
+
+
+def test_nested_digitized_date_precedes_top_level_date(tmp_path):
+    source = tmp_path / "photo.jpg"
+    make_nested_date_image(
+        source,
+        top_level="2010:07:25 18:36:32",
+        digitized="2009:10:31 01:02:03",
+    )
+
+    info = inspect_image(source, tmp_path)
+
+    assert info["exif_date"] == "2009-10-31"
+    assert info["date_source"] == "DateTimeDigitized"
+
+
+def test_top_level_date_is_capture_date_fallback(tmp_path):
+    source = tmp_path / "photo.jpg"
+    make_nested_date_image(source, top_level="2010:07:25 18:36:32")
+
+    info = inspect_image(source, tmp_path)
+
+    assert info["exif_date"] == "2010-07-25"
+    assert info["date_source"] == "DateTime"
 
 
 def test_perceptual_hash_normalizes_exif_orientation(tmp_path):
@@ -590,6 +654,7 @@ def test_pending_high_resolution_wins_over_organized_thumbnail(tmp_path):
     result = organize(index, tmp_path / "library")
     assert result["copied"] == 1
     assert result["deprecated"] == 1
+    assert result["folders"] == {str(tmp_path / "library" / "2024"): 1}
     deprecated_thumbnail = tmp_path / "library" / "deprecated" / "2024" / "thumbnail.jpeg"
     assert not organized_thumbnail.exists()
     assert deprecated_thumbnail.read_bytes() == thumbnail.read_bytes()
@@ -649,6 +714,7 @@ def test_deprecation_dry_run_does_not_change_file_or_index(tmp_path):
     result = organize(index, tmp_path / "library", dry_run=True)
 
     assert result["deprecated"] == 1
+    assert result["folders"] == {str(tmp_path / "library" / "unsorted"): 1}
     assert organized.exists()
     assert not (tmp_path / "library" / "deprecated").exists()
     row = index.execute(
@@ -656,6 +722,129 @@ def test_deprecation_dry_run_does_not_change_file_or_index(tmp_path):
         (str(thumbnail),),
     ).fetchone()
     assert tuple(row) == ("organized", str(organized))
+
+
+def test_repair_dates_moves_file_using_nested_original_date(tmp_path):
+    source = tmp_path / "source.jpg"
+    make_nested_date_image(
+        source,
+        top_level="2010:07:25 18:36:32",
+        original="2009:10:30 22:10:05",
+    )
+    destination = tmp_path / "library"
+    info = inspect_image(source, tmp_path)
+    old_path = destination / "2010" / f"2010-07-25-{info['md5']}.jpeg"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_bytes(source.read_bytes())
+    info.update(
+        status="organized",
+        exif_date="2010-07-25",
+        date_source="DateTime",
+        destination_path=str(old_path),
+    )
+    index = open_index(tmp_path / "index.sqlite")
+    upsert_image(index, info)
+    index.commit()
+
+    result = organize(index, destination, repair_dates=True)
+
+    new_path = destination / "2009" / f"2009-10-30-{info['md5']}.jpeg"
+    assert result["repair"] == {
+        "scanned": 1,
+        "corrected": 1,
+        "relocated": 1,
+        "unchanged": 0,
+        "unindexed": 0,
+        "errors": 0,
+    }
+    assert not old_path.exists()
+    assert new_path.read_bytes() == source.read_bytes()
+    row = index.execute("SELECT exif_date, date_source, destination_path FROM images").fetchone()
+    assert tuple(row) == ("2009-10-30", "DateTimeOriginal", str(new_path))
+    assert organize(index, destination, repair_dates=True)["repair"]["unchanged"] == 1
+
+
+def test_repair_dates_dry_run_includes_unsorted_without_changes(tmp_path):
+    source = tmp_path / "source.jpg"
+    make_nested_date_image(
+        source,
+        top_level="2010:07:25 18:36:32",
+        original="2009:10:30 22:10:05",
+    )
+    destination = tmp_path / "library"
+    info = inspect_image(source, tmp_path)
+    old_path = destination / "unsorted" / f"0000-00-00-{info['md5']}.jpeg"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_bytes(source.read_bytes())
+    info.update(
+        status="organized",
+        exif_date=None,
+        date_source=None,
+        destination_path=str(old_path),
+    )
+    index = open_index(tmp_path / "index.sqlite")
+    upsert_image(index, info)
+    index.commit()
+
+    result = organize(index, destination, dry_run=True, repair_dates=True)
+
+    new_path = destination / "2009" / f"2009-10-30-{info['md5']}.jpeg"
+    assert result["repair"]["scanned"] == 1
+    assert result["repair"]["corrected"] == 1
+    assert result["repair"]["relocated"] == 1
+    assert old_path.exists()
+    assert not new_path.exists()
+    row = index.execute("SELECT exif_date, date_source, destination_path FROM images").fetchone()
+    assert tuple(row) == (None, None, str(old_path))
+
+
+def test_repair_dates_excludes_deprecated_and_leaves_unindexed_files(tmp_path):
+    destination = tmp_path / "library"
+    deprecated = destination / "deprecated" / "2010" / "old.jpeg"
+    unindexed = destination / "2010" / "unindexed.jpeg"
+    deprecated.parent.mkdir(parents=True)
+    unindexed.parent.mkdir(parents=True)
+    make_nested_date_image(
+        deprecated,
+        top_level="2010:07:25 18:36:32",
+        original="2009:10:30 22:10:05",
+    )
+    make_nested_date_image(
+        unindexed,
+        top_level="2010:07:25 18:36:32",
+        original="2009:10:30 22:10:05",
+    )
+    info = inspect_image(deprecated, tmp_path)
+    info.update(status="duplicate", destination_path=str(deprecated))
+    index = open_index(tmp_path / "index.sqlite")
+    upsert_image(index, info)
+    index.commit()
+    scan_updates = []
+    totals = []
+    updates = []
+    finishes = []
+
+    result = organize(
+        index,
+        destination,
+        repair_dates=True,
+        repair_scan_callback=lambda directories, entries, matches: scan_updates.append(
+            (directories, entries, matches)
+        ),
+        repair_progress_start=totals.append,
+        repair_progress_callback=lambda path, status: updates.append((path, status)),
+        repair_progress_finish=lambda: finishes.append(True),
+    )
+
+    assert result["repair"]["scanned"] == 0
+    assert result["repair"]["unindexed"] == 1
+    assert result["repair"]["relocated"] == 0
+    assert scan_updates[-1][2] == 1
+    assert totals == [1]
+    assert updates == [(str(unindexed), "unindexed")]
+    assert finishes == [True]
+    assert deprecated.exists()
+    assert unindexed.exists()
 
 
 def test_deprecation_does_not_overwrite_existing_file(tmp_path):

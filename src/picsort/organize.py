@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .images import inspect_capture_date, is_supported, normalized_extension
 from .index import pending_images
 
 
@@ -177,6 +180,152 @@ def date_parts(exif_date: str | None) -> tuple[str, str]:
     return "unsorted", "0000-00-00"
 
 
+def repair_destination_dates(
+    connection,
+    destination: Path,
+    dry_run: bool = False,
+    scan_callback=None,
+    progress_start=None,
+    progress_callback=None,
+    progress_finish=None,
+) -> dict:
+    summary = {
+        "scanned": 0,
+        "corrected": 0,
+        "relocated": 0,
+        "unchanged": 0,
+        "unindexed": 0,
+        "errors": 0,
+    }
+    try:
+        destination = destination.resolve()
+    except (OSError, RuntimeError):
+        summary["errors"] += 1
+        if progress_start:
+            progress_start(0)
+        if progress_finish:
+            progress_finish()
+        return summary
+    indexed = connection.execute(
+        "SELECT id, md5, exif_date, date_source, destination_path FROM images "
+        "WHERE media_type='image' AND status != 'stale' AND destination_path IS NOT NULL"
+    ).fetchall()
+    rows_by_path = {}
+    for row in indexed:
+        managed = _managed_destination(destination, row["destination_path"])
+        if managed is not None:
+            rows_by_path.setdefault(managed, []).append(row)
+
+    candidates = []
+    deprecated = destination / "deprecated"
+    directory_count = entry_count = 0
+    for root, directories, filenames in os.walk(destination, followlinks=False):
+        directory_count += 1
+        root_path = Path(root)
+        entry_count += len(directories) + len(filenames)
+        directories[:] = [
+            name
+            for name in directories
+            if not (root_path / name).is_symlink() and (root_path / name).resolve() != deprecated
+        ]
+        for filename in filenames:
+            path = root_path / filename
+            if path.is_symlink() or not is_supported(path, "image"):
+                continue
+            candidates.append(path)
+        if scan_callback:
+            scan_callback(directory_count, entry_count, len(candidates))
+    if scan_callback:
+        scan_callback(directory_count, entry_count, len(candidates))
+    if progress_start:
+        progress_start(len(candidates))
+
+    def update(path: Path, status: str) -> None:
+        if progress_callback:
+            progress_callback(str(path), status)
+
+    for path in candidates:
+        status = "unchanged"
+        try:
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError):
+                summary["errors"] += 1
+                status = "error"
+                continue
+            matching_rows = rows_by_path.get(path)
+            if not matching_rows:
+                summary["unindexed"] += 1
+                status = "unindexed"
+                continue
+            summary["scanned"] += 1
+            try:
+                exif_date, date_source = inspect_capture_date(path)
+            except (OSError, RuntimeError, ValueError):
+                summary["errors"] += 1
+                status = "error"
+                continue
+            md5_values = {row["md5"] for row in matching_rows if row["md5"]}
+            if len(md5_values) != 1:
+                summary["errors"] += 1
+                status = "error"
+                continue
+            md5 = md5_values.pop()
+            folder_name, filename_date = date_parts(exif_date)
+            target = (
+                destination / folder_name / f"{filename_date}-{md5}.{normalized_extension(path)}"
+            )
+            metadata_changed = any(
+                row["exif_date"] != exif_date or row["date_source"] != date_source
+                for row in matching_rows
+            )
+            relocation_needed = path != target
+            if metadata_changed:
+                summary["corrected"] += 1
+            if not relocation_needed and not metadata_changed:
+                summary["unchanged"] += 1
+                continue
+            if relocation_needed and target.exists():
+                summary["errors"] += 1
+                status = "error"
+                if not dry_run and metadata_changed:
+                    connection.executemany(
+                        "UPDATE images SET exif_date=?, date_source=? WHERE id=?",
+                        [(exif_date, date_source, row["id"]) for row in matching_rows],
+                    )
+                continue
+            if relocation_needed:
+                summary["relocated"] += 1
+                status = "relocated"
+                if not dry_run:
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(path, target)
+                    except OSError:
+                        summary["relocated"] -= 1
+                        summary["errors"] += 1
+                        status = "error"
+                        continue
+            elif metadata_changed:
+                status = "corrected"
+            if not dry_run:
+                destination_path = str(target if relocation_needed else path)
+                connection.executemany(
+                    "UPDATE images SET exif_date=?, date_source=?, destination_path=? WHERE id=?",
+                    [
+                        (exif_date, date_source, destination_path, row["id"])
+                        for row in matching_rows
+                    ],
+                )
+        finally:
+            update(path, status)
+    if not dry_run:
+        connection.commit()
+    if progress_finish:
+        progress_finish()
+    return summary
+
+
 def organize(
     connection,
     destination: Path,
@@ -187,14 +336,35 @@ def organize(
     progress_callback=None,
     media_type: str = "image",
     source_roots=None,
+    repair_dates: bool = False,
+    repair_scan_callback=None,
+    repair_progress_start=None,
+    repair_progress_callback=None,
+    repair_progress_finish=None,
 ) -> dict:
+    repair_summary = (
+        repair_destination_dates(
+            connection,
+            destination,
+            dry_run,
+            repair_scan_callback,
+            repair_progress_start,
+            repair_progress_callback,
+            repair_progress_finish,
+        )
+        if repair_dates and media_type == "image"
+        else None
+    )
     rows = list(pending_images(connection, media_type, source_roots))
     renamed, errors = _normalize_destinations(
         connection, rows, destination, dry_run or media_type != "image"
     )
+    if repair_summary:
+        errors += repair_summary["errors"]
     if not dry_run and media_type == "image":
         rows = list(pending_images(connection, media_type, source_roots))
     copied = skipped = duplicates = deprecated = 0
+    added_by_folder = Counter()
     plans = []
     groups = [[row] for row in rows] if media_type == "video" else _groups(rows, threshold)
     for group in groups:
@@ -251,6 +421,7 @@ def organize(
         nonlocal copied, skipped, duplicates
         if copied_now:
             copied += 1
+            added_by_folder[str(output.parent)] += 1
         elif output.exists():
             skipped += 1
         else:
@@ -279,6 +450,7 @@ def organize(
                 skipped += 1
             else:
                 copied += 1
+                added_by_folder[str(output.parent)] += 1
             duplicates += sum(row["id"] != winner["id"] for row in pending)
             for row in retire:
                 paths = _deprecated_path(destination, row["destination_path"])
@@ -319,11 +491,15 @@ def organize(
                         progress_callback(winner["source_path"], "error")
     if not dry_run:
         connection.commit()
-    return {
+    result = {
         "copied": copied,
         "skipped": skipped,
         "duplicates": duplicates,
         "deprecated": deprecated,
         "renamed": renamed,
         "errors": errors,
+        "folders": dict(sorted(added_by_folder.items())),
     }
+    if repair_summary is not None:
+        result["repair"] = repair_summary
+    return result

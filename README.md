@@ -74,6 +74,18 @@ Add `-v` or `--verbose` to any command to print each processed file or report st
 ./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --workers 8 --dry-run
 ```
 
+At the end of organization, picsort prints the number of files copied into each destination folder. Dry runs print the corresponding planned additions; existing files reported as skipped are not included.
+
+Image capture dates prefer EXIF `DateTimeOriginal`, then `DateTimeDigitized`, then the top-level `DateTime` modification value. To repair an existing destination after upgrading, preview and apply a destination-wide metadata rescan with:
+
+```bash
+./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --repair-dates --dry-run
+./bin/picsort organize --index /Library/.picsort.sqlite --destination /Library --repair-dates
+```
+
+Date repair includes managed images in year folders and `unsorted`, but skips the entire `deprecated` subtree. It updates matching index rows and moves incorrectly dated files without overwriting existing targets. Unindexed destination files are reported and left unchanged.
+While repairing, picsort first shows a destination-scanning spinner and then a progress bar with the exact number of candidate images, processing rate, and ETA. Use `--verbose` for per-file repair outcomes or `--quiet` to suppress both stages.
+
 `discover` and `run` show directory and entry counts, matching-file counts, elapsed time, and scan rate by default while the source directory is being enumerated. The exact total and ETA become available once enumeration finishes. Use `-q` or `--quiet` to suppress live status output:
 
 ```bash
