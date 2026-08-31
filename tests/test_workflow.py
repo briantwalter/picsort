@@ -6,7 +6,13 @@ import pytest
 from PIL import Image, ImageOps
 
 from picsort.cli import main
-from picsort.images import inspect_image, is_supported, normalized_extension
+from picsort.images import (
+    _video_capture_date,
+    _video_frame_rate,
+    inspect_image,
+    is_supported,
+    normalized_extension,
+)
 from picsort.index import open_index, upsert_image
 from picsort.organize import date_parts, organize
 from picsort.report import render
@@ -598,6 +604,51 @@ def test_video_discovery_is_exclusive(tmp_path, monkeypatch):
     assert rows[0]["status"] == "error"
 
 
+def test_dv_support_excludes_appledouble_sidecars(tmp_path):
+    capture = tmp_path / "capture.DV"
+    sidecar = tmp_path / "._capture.dv"
+    capture.write_bytes(b"dv")
+    sidecar.write_bytes(b"metadata")
+
+    assert is_supported(capture, "video")
+    assert not is_supported(capture, "image")
+    assert not is_supported(sidecar, "video")
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("dvgrab-2004.05.30_16-38-12.dv", ("2004-05-30", "dvgrab filename")),
+        ("dvgrab-2004.02.30_16-38-12.dv", (None, None)),
+        ("family-2004.05.30.dv", (None, None)),
+    ],
+)
+def test_dvgrab_filename_date(filename, expected):
+    assert _video_capture_date(Path(filename), {}) == expected
+
+
+def test_embedded_video_date_precedes_dvgrab_filename():
+    capture = Path("dvgrab-2004.05.30_16-38-12.dv")
+
+    assert _video_capture_date(capture, {"creation_time": "2005-06-07T12:00:00Z"}) == (
+        "2005-06-07",
+        "VideoMetadata",
+    )
+
+
+def test_dv_frame_rate_prefers_guessed_rate():
+    class CodecContext:
+        name = "dvvideo"
+
+    class Stream:
+        codec_context = CodecContext()
+        average_rate = 60000
+        guessed_rate = 30000 / 1001
+        base_rate = 30000 / 1001
+
+    assert _video_frame_rate(Stream()) == pytest.approx(29.97, rel=0.001)
+
+
 def test_video_organize_uses_md5_and_embedded_date(tmp_path):
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"video bytes")
@@ -628,6 +679,42 @@ def test_video_organize_uses_md5_and_embedded_date(tmp_path):
     result = organize(index, tmp_path / "library", media_type="video")
     assert result["copied"] == 1
     assert (tmp_path / "library" / "2024" / ("2024-03-04-" + "a" * 32 + ".mp4")).exists()
+
+
+def test_dv_organize_preserves_bytes_and_extension(tmp_path):
+    source = tmp_path / "dvgrab-2004.05.30_16-38-12.dv"
+    source.write_bytes(b"native dv bytes")
+    index = open_index(tmp_path / "index.sqlite")
+    from picsort.index import upsert_image
+
+    upsert_image(
+        index,
+        {
+            "source_path": str(source),
+            "source_root": str(tmp_path),
+            "size": source.stat().st_size,
+            "mtime_ns": source.stat().st_mtime_ns,
+            "md5": "b" * 32,
+            "media_type": "video",
+            "extension": "dv",
+            "width": 720,
+            "height": 480,
+            "bitrate": 28_771_229,
+            "frame_rate": 30000 / 1001,
+            "duration": 1,
+            "codec": "dvvideo",
+            "exif_date": "2004-05-30",
+            "date_source": "dvgrab filename",
+            "status": "ready",
+        },
+    )
+    index.commit()
+
+    result = organize(index, tmp_path / "library", media_type="video")
+    output = tmp_path / "library" / "2004" / ("2004-05-30-" + "b" * 32 + ".dv")
+
+    assert result["copied"] == 1
+    assert output.read_bytes() == source.read_bytes()
 
 
 def test_pending_high_resolution_wins_over_organized_thumbnail(tmp_path):

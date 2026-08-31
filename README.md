@@ -65,7 +65,7 @@ Videos are opt-in and exclusive. Install the PyAV dependency from `requirements.
   --workers 8
 ```
 
-Supported video extensions are `mp4`, `mov`, `m4v`, `avi`, `mkv`, and `webm`. Video duplicates use exact MD5 matching and are copied byte-for-byte. Embedded container dates are used for year folders; missing dates and epoch dates go under `unsorted`.
+Supported video extensions are `mp4`, `mov`, `m4v`, `avi`, `mkv`, `webm`, and `dv`. Video duplicates use exact MD5 matching and are copied byte-for-byte. Embedded container dates are used for year folders. DV captures without an embedded date also recognize the strict `dvgrab-YYYY.MM.DD_HH-MM-SS.dv` naming convention. Missing dates and epoch dates go under `unsorted`.
 
 Add `-v` or `--verbose` to any command to print each processed file or report stage. Without verbose mode, `discover` and `organize` show a live progress bar with completed count, processing rate, and estimated time remaining. For example:
 

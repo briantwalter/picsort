@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import re
 import threading
+from datetime import date
 from pathlib import Path
 
 import imagehash
@@ -29,7 +30,7 @@ SUPPORTED = {
     ".rw2",
     ".pef",
 }
-VIDEO_SUPPORTED = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+VIDEO_SUPPORTED = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".dv"}
 RAW_EXTENSIONS = {
     ".raw",
     ".cr2",
@@ -49,7 +50,7 @@ _HEIF_REGISTERED = False
 
 def is_supported(path: Path, media_type: str = "image") -> bool:
     extensions = VIDEO_SUPPORTED if media_type == "video" else SUPPORTED
-    return path.is_file() and path.suffix.lower() in extensions
+    return path.is_file() and not path.name.startswith("._") and path.suffix.lower() in extensions
 
 
 def ignored_by_name(path: Path, patterns: tuple[str, ...]) -> bool:
@@ -207,6 +208,44 @@ def _video_date(metadata: dict) -> str | None:
     return None
 
 
+def _dvgrab_date(path: Path) -> str | None:
+    match = re.fullmatch(
+        r"dvgrab-(\d{4})\.(\d{2})\.(\d{2})_\d{2}-\d{2}-\d{2}\.dv",
+        path.name,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    year, month, day = (int(value) for value in match.groups())
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _video_capture_date(path: Path, metadata: dict) -> tuple[str | None, str | None]:
+    metadata_date = _video_date(metadata)
+    if metadata_date:
+        return metadata_date, "VideoMetadata"
+    if path.suffix.lower() == ".dv":
+        filename_date = _dvgrab_date(path)
+        if filename_date:
+            return filename_date, "dvgrab filename"
+    return None, None
+
+
+def _video_frame_rate(stream) -> float | None:
+    codec_name = (getattr(stream.codec_context, "name", None) or "").lower()
+    if codec_name == "dvvideo":
+        rates = (stream.guessed_rate, stream.base_rate, stream.average_rate)
+    else:
+        rates = (stream.average_rate, stream.guessed_rate, stream.base_rate)
+    for rate in rates:
+        if rate and float(rate) > 0:
+            return float(rate)
+    return None
+
+
 def inspect_video(path: Path, source_root: Path) -> dict:
     result = _base_result(path, source_root, "video")
     result["md5"] = md5_file(path)
@@ -223,7 +262,7 @@ def inspect_video(path: Path, source_root: Path) -> dict:
         result["height"] = stream.codec_context.height
         result["codec"] = stream.codec_context.name
         result["bitrate"] = stream.bit_rate or container.bit_rate
-        result["frame_rate"] = float(stream.average_rate) if stream.average_rate else None
+        result["frame_rate"] = _video_frame_rate(stream)
         if stream.duration is not None and stream.time_base is not None:
             result["duration"] = float(stream.duration * stream.time_base)
         elif container.duration is not None:
@@ -231,7 +270,7 @@ def inspect_video(path: Path, source_root: Path) -> dict:
         metadata = dict(container.metadata)
         metadata.update(stream.metadata)
         result["metadata_count"] = len(metadata)
-        result["exif_date"] = _video_date(metadata)
+        result["exif_date"], result["date_source"] = _video_capture_date(path, metadata)
     finally:
         container.close()
     return result
