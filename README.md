@@ -86,7 +86,7 @@ Image capture dates prefer EXIF `DateTimeOriginal`, then `DateTimeDigitized`, th
 Date repair includes managed images in year folders and `unsorted`, but skips the entire `deprecated` subtree. It updates matching index rows and moves incorrectly dated files without overwriting existing targets. Unindexed destination files are reported and left unchanged.
 While repairing, picsort first shows a destination-scanning spinner and then a progress bar with the exact number of candidate images, processing rate, and ETA. Use `--verbose` for per-file repair outcomes or `--quiet` to suppress both stages.
 
-`discover` and `run` show directory and entry counts, matching-file counts, elapsed time, and scan rate by default while the source directory is being enumerated. The exact total and ETA become available once enumeration finishes. Use `-q` or `--quiet` to suppress live status output:
+`discover` and `run` show directory and entry counts, matching-file counts, elapsed time, and scan rate by default while the source directory is being enumerated. The exact total and ETA become available once enumeration finishes. Use `-q` or `--quiet` to suppress live status output. Source and per-file errors remain visible on stderr:
 
 ```bash
 ./bin/picsort discover /Photos --index /Library/.picsort.sqlite --quiet

@@ -8,3 +8,5 @@ __pycache__/
 *.sqlite-shm
 *.sqlite-wal
 *sources.txt
+piclib/
+vidlib/

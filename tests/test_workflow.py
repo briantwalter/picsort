@@ -604,6 +604,81 @@ def test_video_discovery_is_exclusive(tmp_path, monkeypatch):
     assert rows[0]["status"] == "error"
 
 
+def test_discovery_records_decoder_error_and_skips_it_until_changed(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    corrupt = source / "corrupt.cr2"
+    corrupt.write_bytes(b"corrupt raw data")
+    index_path = tmp_path / "index.sqlite"
+    attempts = 0
+
+    class DecoderError(Exception):
+        pass
+
+    def fail_inspection(path, source_root, media_type):
+        nonlocal attempts
+        attempts += 1
+        raise DecoderError("Data error or unsupported file format")
+
+    monkeypatch.setattr("picsort.cli.inspect_media", fail_inspection)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "picsort",
+            "discover",
+            str(source),
+            "--index",
+            str(index_path),
+            "--quiet",
+        ],
+    )
+
+    main()
+
+    output = capsys.readouterr()
+    assert attempts == 1
+    assert f"file error: {str(corrupt)!a}" in output.err
+    assert "DecoderError: Data error or unsupported file format" in output.err
+    assert "errors=1" in output.out
+    row = open_index(index_path).execute("SELECT * FROM images").fetchone()
+    assert row["source_path"] == str(corrupt)
+    assert row["size"] == corrupt.stat().st_size
+    assert row["mtime_ns"] == corrupt.stat().st_mtime_ns
+    assert row["status"] == "error"
+    assert row["error"] == "DecoderError: Data error or unsupported file format"
+
+    main()
+    output = capsys.readouterr()
+    assert attempts == 1
+    assert "unchanged=1" in output.out
+    assert "file error:" not in output.err
+
+    corrupt.write_bytes(b"changed corrupt raw data")
+    main()
+    output = capsys.readouterr()
+    assert attempts == 2
+    assert "errors=1" in output.out
+    assert "file error:" in output.err
+
+
+def test_discovery_does_not_treat_index_errors_as_file_errors(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    make_image(source / "photo.jpg")
+    index_path = tmp_path / "index.sqlite"
+
+    def fail_upsert(_connection, _values):
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr("picsort.cli.upsert_image", fail_upsert)
+    monkeypatch.setattr(
+        "sys.argv", ["picsort", "discover", str(source), "--index", str(index_path)]
+    )
+
+    with pytest.raises(RuntimeError, match="index unavailable"):
+        main()
+
+
 def test_dv_support_excludes_appledouble_sidecars(tmp_path):
     capture = tmp_path / "capture.DV"
     sidecar = tmp_path / "._capture.dv"

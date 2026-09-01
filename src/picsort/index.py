@@ -138,6 +138,6 @@ def is_unchanged(
         row
         and row["size"] == size
         and row["mtime_ns"] == mtime_ns
-        and row["md5"]
+        and (row["md5"] or row["status"] == "error")
         and row["status"] != "stale"
     )

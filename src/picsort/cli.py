@@ -152,10 +152,12 @@ def _discover(args) -> list[Path]:
         print(f"Found {len(paths)} {media_type} files; inspecting metadata and hashes...")
     connection = open_index(index_path)
     candidates = []
+    stats_by_path = {}
     unchanged = 0
     for path in paths:
         try:
             stat = Path(path).stat()
+            stats_by_path[path] = stat
             source = roots_by_path[path]
             if is_unchanged(
                 connection, path, str(source), stat.st_size, stat.st_mtime_ns, media_type
@@ -180,22 +182,27 @@ def _discover(args) -> list[Path]:
         for future in as_completed(futures):
             path = futures[future]
             try:
-                upsert_image(connection, future.result())
-                results += 1
-            except (OSError, RuntimeError, ValueError) as exc:
+                inspected = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate failures to one media file
+                stat = stats_by_path.get(path)
+                error = f"{type(exc).__name__}: {exc}"
+                print(f"file error: {_display_path(Path(path))}: {error}", file=sys.stderr)
                 upsert_image(
                     connection,
                     {
                         "source_path": path,
                         "source_root": str(roots_by_path[path]),
-                        "size": 0,
-                        "mtime_ns": 0,
+                        "size": stat.st_size if stat else 0,
+                        "mtime_ns": stat.st_mtime_ns if stat else 0,
                         "media_type": media_type,
                         "status": "error",
-                        "error": str(exc),
+                        "error": error,
                     },
                 )
                 failures += 1
+            else:
+                upsert_image(connection, inspected)
+                results += 1
             if progress:
                 progress.update(path)
             if results % 100 == 0:
