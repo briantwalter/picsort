@@ -22,6 +22,31 @@ Camera RAW formats `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf
 
 ## Workflow
 
+```mermaid
+flowchart LR
+    sources[Source directories] --> discover[discover]
+    source_list[Source list] --> discover
+
+    subgraph picsort["picsort components"]
+        cli[CLI orchestration<br/>discover / organize / report / run]
+        inspect[Media inspection<br/>metadata, MD5, perceptual hash]
+        index[(SQLite index)]
+        organize[Organization<br/>group, select, copy, repair]
+        report[HTML reporting]
+
+        cli --> inspect
+        inspect --> index
+        cli --> organize
+        index --> organize
+        cli --> report
+        index --> report
+    end
+
+    discover --> cli
+    organize --> library[Date-based library<br/>year / unsorted / deprecated]
+    report --> html[Standalone HTML report]
+```
+
 Discovery is resumable and may be rerun after an interruption:
 
 ```bash
