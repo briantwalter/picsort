@@ -4,21 +4,39 @@
 
 ## Setup
 
+Use Python 3.10 or newer. The repository setup installs the core dependencies, all three optional media dependencies (HEIC, RAW, and video), and development tools:
+
 ```bash
 python3 -m venv venv
 source ./venv/bin/activate
 pip3 install -r requirements.txt
 ```
 
-Install optional decoders when needed:
+For a minimal editable installation instead, install the core package and select only the extras you need:
 
 ```bash
-pip3 install -e '.[heic,raw]'
+pip3 install -e .                    # Core image formats
+pip3 install -e '.[heic,raw,video]'   # All optional media dependencies
 ```
 
-HEIC originals, including the still-image component of Live Photos, require the `heic` extra. After installing it, rerun `discover` to retry previously failed HEIC files, then rerun `organize` to consider the recovered high-resolution originals.
+### Decoders and recognized formats
 
-Camera RAW formats `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf`, `.rw2`, and `.pef` require the `raw` extra. Support for a particular `.raw` container depends on LibRaw through `rawpy`; unsupported or corrupt files are recorded as per-file errors without stopping discovery. Organized RAW originals are copied byte-for-byte.
+Discovery filters by file extension (case-insensitive). Installing a decoder does not expand this list; a recognized extension also does not guarantee that a particular file can be read.
+
+| Media | Recognized extensions | Dependency / extra |
+| --- | --- | --- |
+| Standard images | `.jpg`, `.jpeg`, `.png`, `.gif`, `.tif`, `.tiff`, `.webp` | `Pillow>=10.0` (core) |
+| HEIC images | `.heic` | `pillow-heif>=0.16` / `heic` |
+| Camera RAW | `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf`, `.rw2`, `.pef` | `rawpy>=0.19` / `raw` |
+| Video (with `--videos`) | `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, `.dv` | PyAV (`av>=12.0`) / `video` |
+
+HEIC originals, including the still-image component of Live Photos, use the Pillow opener registered by `pillow-heif`. `.heif` and `.avif` are not currently included in discovery.
+
+Camera RAW support depends on the formats handled by the installed `rawpy`/LibRaw decoder. Inspection uses an 8-bit, half-size rendered image for dimensions, perceptual hashing, and sharpness. The current RAW path does not transfer capture-date metadata into that rendered image, so RAW files normally go under `unsorted`. Organized originals are still copied byte-for-byte.
+
+Video inspection uses PyAV to read container and stream metadata; it does not decode frames for visual duplicate detection. The application does not invoke the `ffmpeg` or `ffprobe` command-line tools.
+
+Missing dependencies and unsupported or corrupt files are recorded as per-file errors without stopping discovery. Unchanged image files with recorded errors are skipped on later scans, even after installing a decoder. There is currently no force-retry flag: to recheck them without modifying source files or the existing index, run discovery with a new index path. A rerun using the existing index retries a file when its size or modification time changes.
 
 ## Workflow
 
@@ -81,7 +99,7 @@ To run all three phases in sequence, use `run`. The organize phase processes onl
   --dry-run
 ```
 
-Videos are opt-in and exclusive. Install the PyAV dependency from `requirements.txt`, then use `--videos` to process only video clips:
+Videos are opt-in and exclusive. PyAV is included in the repository setup above; for a minimal installation, add it with `pip3 install -e '.[video]'`. Use `--videos` to process only video clips:
 
 ```bash
 ./bin/picsort run /Videos --videos \
