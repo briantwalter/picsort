@@ -6,7 +6,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .images import inspect_capture_date, is_supported, normalized_extension
+from .images import inspect_capture_date, is_supported, md5_file, normalized_extension
 from .index import pending_images
 
 
@@ -63,6 +63,69 @@ def _groups(rows, threshold: int):
 def _copy_file(source: str, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, output)
+
+
+def _copy_video(source: str, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(source, "rb") as reader:
+        try:
+            writer = output.open("xb")
+        except FileExistsError:
+            raise ValueError(f"Video destination already exists: {output}") from None
+        try:
+            with writer:
+                shutil.copyfileobj(reader, writer)
+            shutil.copystat(source, output)
+        except BaseException:
+            output.unlink(missing_ok=True)
+            raise
+
+
+def _checked_videos(connection, rows, destination, dry_run):
+    from .video_references import VIDEO_INSPECTION_VERSION, has_external_references
+    from .video_repair import managed_path
+
+    ready = []
+    errors = 0
+    cache = {}
+    for original in rows:
+        row = dict(original)
+        if row.get("video_inspection_version") == VIDEO_INSPECTION_VERSION:
+            ready.append(row)
+            continue
+        try:
+            path = Path(row["source_path"])
+            if row["destination_path"]:
+                managed = managed_path(destination.resolve(), row["destination_path"])
+                if managed.is_file():
+                    path = managed
+            if path not in cache:
+                if not path.is_file() or path.is_symlink():
+                    raise ValueError("Video unavailable for reference inspection")
+                cache[path] = has_external_references(path)
+            excluded = cache[path]
+            if not dry_run:
+                connection.execute(
+                    "UPDATE images SET video_inspection_version=?, exclusion_reason=? WHERE id=?",
+                    (
+                        VIDEO_INSPECTION_VERSION,
+                        "external_reference" if excluded else None,
+                        row["id"],
+                    ),
+                )
+                if excluded:
+                    connection.execute(
+                        "UPDATE images SET status='excluded' WHERE id=?", (row["id"],)
+                    )
+            if not excluded:
+                ready.append(row)
+        except (OSError, ValueError) as exc:
+            errors += 1
+            if not dry_run:
+                connection.execute(
+                    "UPDATE images SET status='error', error=? WHERE id=?", (str(exc), row["id"])
+                )
+    return ready, errors
 
 
 def _pixel_count(row) -> int:
@@ -366,23 +429,71 @@ def organize(
     copied = skipped = duplicates = deprecated = 0
     added_by_folder = Counter()
     plans = []
-    groups = [[row] for row in rows] if media_type == "video" else _groups(rows, threshold)
+    if media_type == "video":
+        rows, inspection_errors = _checked_videos(connection, rows, destination, dry_run)
+        errors += inspection_errors
+        exact = {}
+        for row in rows:
+            exact.setdefault(row["md5"], []).append(row)
+        groups = list(exact.values())
+    else:
+        groups = _groups(rows, threshold)
     for group in groups:
         winner = max(group, key=quality)
         pending = [row for row in group if row["status"] != "organized"]
+        existing_video_path = None
+        if media_type == "video":
+            from .video_repair import managed_path
+
+            existing = []
+            try:
+                for row in group:
+                    if row["destination_path"]:
+                        path = managed_path(destination.resolve(), row["destination_path"])
+                        if path.is_file():
+                            existing.append((row, path))
+                paths = {path for _, path in existing}
+                if len(paths) > 1:
+                    raise ValueError("One video hash has multiple destinations; review required")
+            except (OSError, ValueError):
+                errors += 1
+                continue
+            if existing:
+                winner, existing_video_path = min(
+                    existing, key=lambda pair: (pair[0]["status"] != "organized", pair[0]["id"])
+                )
+            else:
+                winner = min(group, key=lambda row: row["id"])
+            pending = group
+            if existing and all(
+                row["status"] == ("organized" if row["id"] == winner["id"] else "duplicate")
+                for row in group
+            ):
+                continue
         if not pending:
             continue
         folder_name, filename_date = date_parts(winner["exif_date"])
         folder = destination / folder_name
         output = folder / f"{filename_date}-{winner['md5']}.{_canonical_extension(winner)}"
+        if existing_video_path is not None:
+            output = existing_video_path
         retire = [
             row
             for row in group
-            if row["status"] == "organized"
+            if media_type != "video"
+            and row["status"] == "organized"
             and row["id"] != winner["id"]
             and row["destination_path"]
             and _pixel_count(row) < _pixel_count(winner)
         ]
+        if media_type == "video":
+            try:
+                managed_path(destination.resolve(), str(output))
+                if output.exists() and md5_file(output) != winner["md5"]:
+                    raise ValueError("Existing destination hash differs from index")
+            except (OSError, ValueError):
+                errors += 1
+                continue
         plans.append((winner, pending, output, retire))
     if progress_start:
         progress_start(len(plans))
@@ -436,7 +547,10 @@ def organize(
                 duplicates += 1
                 if not dry_run:
                     connection.execute(
-                        "UPDATE images SET status='duplicate' WHERE id=?", (row["id"],)
+                        "UPDATE images SET status='duplicate', destination_path=? WHERE id=?"
+                        if media_type == "video"
+                        else "UPDATE images SET status='duplicate' WHERE id=?",
+                        (str(output), row["id"]) if media_type == "video" else (row["id"],),
                     )
         if not dry_run:
             retire_lower_resolution(retire)
@@ -468,7 +582,11 @@ def organize(
             record_success(winner, pending, output, retire)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_copy_file, winner["source_path"], output): (
+                pool.submit(
+                    _copy_video if media_type == "video" else _copy_file,
+                    winner["source_path"],
+                    output,
+                ): (
                     winner,
                     pending,
                     output,

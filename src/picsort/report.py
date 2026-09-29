@@ -69,6 +69,13 @@ def render(
         if row["status"] == "organized"
         and _existing_destination(row["destination_path"], destination)
     ]
+    organized = list({row["destination_path"]: row for row in organized}.values())
+    excluded_references = sum(
+        row["status"] == "excluded"
+        and "exclusion_reason" in dict(row)
+        and row["exclusion_reason"] == "external_reference"
+        for row in rows
+    )
     formats = Counter(row["extension"] for row in organized)
     dates = Counter(_capture_year(row["exif_date"]) for row in organized)
     folders = sorted({Path(row["destination_path"]).parent for row in organized})
@@ -95,7 +102,7 @@ table{{border-collapse:collapse}}td,th{{padding:.4rem 1rem;border:1px solid #ccc
 .histogram-bar{{display:block;height:100%;background:#4677b5}}
 .histogram-count{{font-variant-numeric:tabular-nums;text-align:right}}
 </style>
-<h1>picsort library report</h1><p>{label} indexed: {len(rows)} · Organized: {len(organized)} · Duplicates: {sum(row["status"] == "duplicate" for row in rows)} · Errors: {sum(row["status"] == "error" for row in rows)}{video_summary}</p>
+<h1>picsort library report</h1><p>{label} indexed: {len(rows)} · Organized: {len(organized)} · Duplicates: {sum(row["status"] == "duplicate" for row in rows)} · Errors: {sum(row["status"] == "error" for row in rows)} · Excluded references: {excluded_references}{video_summary}</p>
 <h2>Formats</h2><table><tr><th>Format</th><th>{label}</th></tr>{format_rows}</table>
 <h2>Embedded capture dates by year</h2>{date_histogram}
 <h2>Destination folders</h2><ul>{folder_rows}</ul></html>"""

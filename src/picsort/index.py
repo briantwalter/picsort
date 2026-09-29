@@ -4,6 +4,8 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from .video_references import VIDEO_INSPECTION_VERSION
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS images (
     id INTEGER PRIMARY KEY,
@@ -39,7 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_images_status ON images(status);
 """
 
 
-def open_index(path: Path) -> sqlite3.Connection:
+def open_index(path: Path, readonly: bool = False) -> sqlite3.Connection:
+    if readonly:
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        return connection
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -54,6 +60,8 @@ def open_index(path: Path) -> sqlite3.Connection:
         "frame_rate": "REAL",
         "codec": "TEXT",
         "date_source": "TEXT",
+        "video_inspection_version": "INTEGER",
+        "exclusion_reason": "TEXT",
     }
     for column, definition in migrations.items():
         if column not in columns:
@@ -72,7 +80,10 @@ def upsert_image(connection: sqlite3.Connection, values: dict) -> None:
         and existing["mtime_ns"] == values.get("mtime_ns")
     ):
         values = dict(values)
-        values["status"] = existing["status"]
+        if values.get("status") != "excluded" and not (
+            existing["status"] == "error" and values.get("status") == "ready"
+        ):
+            values["status"] = existing["status"]
         values["destination_path"] = existing["destination_path"]
         values["error"] = None
     columns = ", ".join(values)
@@ -130,7 +141,7 @@ def is_unchanged(
     media_type: str,
 ) -> bool:
     row = connection.execute(
-        "SELECT size, mtime_ns, md5, status FROM images "
+        "SELECT size, mtime_ns, md5, status, video_inspection_version FROM images "
         "WHERE source_path=? AND source_root=? AND media_type=?",
         (source_path, source_root, media_type),
     ).fetchone()
@@ -140,4 +151,5 @@ def is_unchanged(
         and row["mtime_ns"] == mtime_ns
         and (row["md5"] or row["status"] == "error")
         and row["status"] != "stale"
+        and (media_type != "video" or row["video_inspection_version"] == VIDEO_INSPECTION_VERSION)
     )

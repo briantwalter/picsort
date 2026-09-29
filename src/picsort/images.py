@@ -247,7 +247,15 @@ def _video_frame_rate(stream) -> float | None:
 
 
 def inspect_video(path: Path, source_root: Path) -> dict:
+    from .video_references import VIDEO_INSPECTION_VERSION, has_external_references
+
     result = _base_result(path, source_root, "video")
+    result["video_inspection_version"] = VIDEO_INSPECTION_VERSION
+    result["exclusion_reason"] = None
+    if has_external_references(path):
+        result.update(status="excluded", exclusion_reason="external_reference")
+        result["md5"] = md5_file(path)
+        return result
     result["md5"] = md5_file(path)
     try:
         import av

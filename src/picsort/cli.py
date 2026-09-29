@@ -231,6 +231,18 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True, title="commands")
+    repair = subparsers.add_parser(
+        "repair-videos", help="Preview or apply video reference quarantine"
+    )
+    repair.add_argument("--index", required=True)
+    repair.add_argument("--destination", required=True)
+    repair.add_argument(
+        "--apply", action="store_true", help="Apply repair (default: read-only preview)"
+    )
+    repair.add_argument(
+        "-v", "--verbose", action="store_true", help="Print each planned or completed file move"
+    )
+    repair.set_defaults(func=_repair_videos)
     discover = subparsers.add_parser("discover", help="Index supported images and EXIF metadata")
     discover_sources = discover.add_mutually_exclusive_group(required=True)
     discover_sources.add_argument("source", nargs="?", help="Source folder to scan recursively")
@@ -354,8 +366,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _repair_videos(args) -> None:
+    from .video_repair import repair_videos
+
+    result = repair_videos(
+        Path(args.index).expanduser().resolve(), Path(args.destination).expanduser(), args.apply
+    )
+    heading = "Video repair" if args.apply else "Video repair preview"
+    summary = {
+        key: result[key]
+        for key in (
+            "scanned",
+            "references",
+            "quarantined",
+            "duplicate_rows",
+            "multiple_destinations",
+        )
+    }
+    summary["errors"] = len(result["errors"])
+    print(f"{heading}: " + " ".join(f"{key}={value}" for key, value in summary.items()))
+    if args.verbose:
+        for move in result["moves"]:
+            print(
+                f"reference: {_display_path(Path(move['source']))} -> "
+                f"{_display_path(Path(move['target']))}"
+            )
+    for error in result["errors"]:
+        print(f"file error: {error}", file=sys.stderr)
+    if "backup" in result:
+        print(f"backup={result['backup']}")
+    if not args.apply:
+        print("Preview only; use --apply to quarantine references and update the index.")
+
+
 def _organize(args, source_roots=None) -> None:
-    connection = open_index(Path(args.index).expanduser().resolve())
+    connection = open_index(Path(args.index).expanduser().resolve(), readonly=args.dry_run)
     progress = None
     repair_progress = None
     repair_scanner = None

@@ -134,3 +134,54 @@ Invalid, missing, unreadable, and non-UTF-8 source paths are reported as source 
 ## Development
 
 Run tests with `pytest`. Run `ruff check .` and `ruff format --check .` before submitting changes. Tests use temporary image libraries and must not depend on personal photo data.
+
+## Repairing video references and duplicate counts
+
+Video discovery checks MOV, MP4, and M4V container references before opening them
+with PyAV. Movies referencing external media are indexed as `excluded` with reason
+`external_reference`, so they are never copied as independent clips. This includes
+iPhoto reference previews even when they have ordinary camera filenames. Folder
+names and file size are not exclusion criteria. Zlib-compressed QuickTime metadata is inspected with a 16 MiB expansion limit.
+Unsupported compression or malformed metadata is reported as a per-file error.
+
+Video organization groups exact MD5 matches, keeps an existing representative when
+available, and marks other sources as duplicates pointing to that file. It does not
+compare re-encoded video content. Reports count each active destination file once.
+
+Preview repair of an existing library (no index or library changes):
+
+```bash
+./bin/picsort repair-videos --index vidlib/idx.sqlite \
+  --destination /Volumes/SD4TB/vidlib
+```
+
+The command prints a text summary and sends file errors to stderr. Add `--verbose`
+to list individual reference-file paths. The recovery manifest remains JSON.
+
+Apply the repair:
+
+```bash
+./bin/picsort repair-videos --index vidlib/idx.sqlite \
+  --destination /Volumes/SD4TB/vidlib --apply
+```
+
+Repair inspects indexed destinations directly, so original source drives need not
+be mounted. It verifies each reference movie's hash, then moves it under
+`deprecated/reference-videos/`, preserving its relative path. Original source
+files are never changed. All index entries sharing the quarantined path become
+excluded. It also reconciles exact-duplicate statuses and regenerates the library's
+`index.html`. Multiple physical destinations for one hash are reported for review
+and left in place. Unverifiable, missing, changed, or conflicting files are reported
+and left untouched. Run repair while other picsort processes are stopped.
+
+Each apply creates an SQLite backup next to the index and saves a move manifest at
+`DESTINATION/.picsort-reference-repair.json`. Keep both for recovery. Rerun the same
+command after interruption to finish recorded moves; do not remove the manifest.
+Quarantine preserves the reference files, and the manifest records their original
+paths and affected index row IDs. To undo a repair, stop picsort, move quarantined
+files back only where their original paths are empty, and restore the corresponding
+pre-repair index backup (restoring a backup also undoes later index changes).
+
+Existing video inspections receive the new reference check once on discovery or
+organization. Run repair first to clean up an existing destination and validate
+its indexed videos without rereading unavailable source libraries.

@@ -738,6 +738,7 @@ def test_video_organize_uses_md5_and_embedded_date(tmp_path):
             "size": source.stat().st_size,
             "mtime_ns": source.stat().st_mtime_ns,
             "md5": "a" * 32,
+            "video_inspection_version": 1,
             "media_type": "video",
             "extension": "mp4",
             "width": 1920,
